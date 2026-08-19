@@ -142,8 +142,8 @@ try {
     Array.isArray(state[key]) ? state[key].length : -1;
   check(
     "real_vault.migration_preserves_state_and_raw",
-    migratedState.schemaVersion === 3
-      && ["sources", "wikiPages", "concepts", "cards", "reviews", "goals"]
+    migratedState.schemaVersion === 4
+      && ["sources", "wikiPages", "concepts"]
         .every((key) => count(originalState, key) === count(migratedState, key))
       && copiedRawBefore === copiedRawAfter
       && String(update.backupRelativePath).startsWith(".metis/backups/"),
@@ -151,7 +151,7 @@ try {
       beforeVersion: originalState.schemaVersion,
       afterVersion: migratedState.schemaVersion,
       counts: Object.fromEntries(
-        ["sources", "wikiPages", "concepts", "cards", "reviews", "goals"]
+        ["sources", "wikiPages", "concepts"]
           .map((key) => [key, count(migratedState, key)]),
       ),
       rawDigestPreserved: copiedRawBefore === copiedRawAfter,
@@ -371,26 +371,6 @@ try {
       evidence: answerEvidence.length,
       concepts: (answer.concepts as Array<Record<string, unknown>>)
         .map((concept) => concept.key),
-    },
-  );
-
-  const practice = await tool(client, "prepare_practice", {
-    topic: "Black-Scholes model and option Greeks",
-    count: 5,
-    difficulty: "adaptive",
-    includeSolutions: false,
-  });
-  check(
-    "real_vault.compact_grounded_practice",
-    bytes(practice) <= 6_500
-      && (practice.evidence as unknown[]).length > 0
-      && (practice.task as Record<string, unknown>).count === 5
-      && !("generatorContract" in practice),
-    {
-      bytes: bytes(practice),
-      task: practice.task,
-      focus: (practice.focus as Record<string, unknown>)?.key,
-      evidence: (practice.evidence as unknown[]).length,
     },
   );
 

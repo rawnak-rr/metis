@@ -66,6 +66,26 @@ const STATE_MIGRATIONS = new Map<number, Migration>([
       };
     }),
   })],
+  [3, (legacy) => {
+    const { cards: _cards, reviews: _reviews, goals: _goals, ...rest } = legacy;
+    return {
+      ...rest,
+      schemaVersion: 4,
+      concepts: arrayOrEmpty(legacy.concepts).map((value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+        const concept = value as JsonObject;
+        return {
+          id: concept.id,
+          title: concept.title,
+          notes: Array.isArray(concept.notes)
+            ? concept.notes.filter((note): note is string =>
+                typeof note === "string" && Boolean(note.trim()))
+            : [],
+          sourceIds: arrayOrEmpty(concept.sourceIds),
+        };
+      }),
+    };
+  }],
 ]);
 
 const CONFIG_MIGRATIONS = new Map<number, Migration>([
@@ -76,7 +96,6 @@ const CONFIG_MIGRATIONS = new Map<number, Migration>([
     groundingDefault: isGroundingMode(legacy.groundingDefault)
       ? legacy.groundingDefault
       : "sources_first",
-    dailyReviewLimit: positiveInteger(legacy.dailyReviewLimit) ?? 30,
   })],
 ]);
 

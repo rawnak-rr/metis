@@ -154,23 +154,13 @@ try {
     "upsert_wiki_page",
     "search_knowledge",
     "prepare_grounded_answer",
-    "prepare_practice",
-    "create_flashcards",
-    "get_review_queue",
-    "record_review",
-    "resolve_misconception",
-    "grade_practice_attempt",
-    "set_study_goal",
-    "plan_study_session",
     "get_knowledge_graph",
     "lint_wiki",
-    "verify_math",
-    "render_math_pdf",
   ];
   check(
     "protocol.required_tools",
     "protocol",
-    "Advertises every required end-to-end study tool",
+    "Advertises every required grounding and maintenance tool",
     6,
     requiredTools.every((name) => toolNames.includes(name)),
     { advertised: toolNames.length, missing: requiredTools.filter((name) => !toolNames.includes(name)) },
@@ -215,11 +205,11 @@ try {
   check(
     "protocol.resources_prompts",
     "protocol",
-    "Exposes navigable resources, templates, and reusable learning prompts",
+    "Exposes navigable resources, templates, and a reusable grounding prompt",
     3,
     listedResources.resources.length >= 2
       && listedTemplates.resourceTemplates.length >= 2
-      && listedPrompts.prompts.length >= 3,
+      && listedPrompts.prompts.length >= 1,
     {
       resources: listedResources.resources.length,
       templates: listedTemplates.resourceTemplates.length,
@@ -459,7 +449,7 @@ try {
       && update.repaired === true
       && (update.wikiHealth as Record<string, unknown>).healthy === true
       && (update.skills as Record<string, unknown>).version === 1
-      && migratedState.schemaVersion === 3
+      && migratedState.schemaVersion === 4
       && (migratedState.wikiPages as Array<Record<string, unknown>>)
         .every((page) => Array.isArray(page.aliases))
       && migratedConfig.schemaVersion === 1
@@ -469,12 +459,6 @@ try {
     { updatePreview, update, backupManifest },
   );
   const currentSnapshot = await tool(client, "metis_repair");
-  await tool(client, "set_study_goal", {
-    title: "Transient restore probe",
-    conceptIds: [],
-    targetMastery: 0.7,
-    minutesPerWeek: 15,
-  });
   const restorePreview = await tool(client, "metis_restore_backup", {
     backupRelativePath: currentSnapshot.backupRelativePath,
     dryRun: true,
@@ -496,7 +480,7 @@ try {
       && String(restored.recoveryBackupRelativePath).startsWith(".metis/backups/")
       && listedBackups.length >= 3
       && listedBackups.every((item) => item.integrity === "valid")
-      && (restoredDashboard.counts as Record<string, unknown>).activeGoals === 0
+      && (restoredDashboard.counts as Record<string, unknown>).sources !== undefined
       && rawBeforeUpdate.equals(await readFile(calculusRawPath)),
     { restorePreview, restored, backupInventory, counts: restoredDashboard.counts },
   );
@@ -663,236 +647,6 @@ try {
     groundedUnknownFirst,
   );
 
-  const failedDerivativeAttempt = await tool(client, "grade_practice_attempt", {
-    conceptId: "derivatives",
-    score: 0,
-    maxScore: 5,
-    misconception: "Confuses the chain rule with the product rule.",
-  });
-  const practice = await tool(client, "prepare_practice", {
-    topic: "derivatives and gradient descent",
-    count: 6,
-    difficulty: "adaptive",
-    formats: ["recall", "explain", "application", "calculation"],
-    includeSolutions: false,
-  });
-  const practiceTask = practice.task as Record<string, unknown>;
-  const practiceFocus = practice.focus as Record<string, unknown>;
-  const practiceLearner = practiceFocus.learner as Record<string, unknown>;
-  const adaptiveMisconceptions = practiceLearner.activeMisconceptions as Array<Record<string, unknown>>;
-  check(
-    "practice.grounded_contract",
-    "learning",
-    "Practice brief is evidence-backed, format-diverse, exact-count, and withholds solutions",
-    6,
-    practiceTask.count === 6
-      && (practice.evidence as unknown[]).length > 0
-      && practiceTask.solutions === false
-      && (practiceTask.formats as string[]).length >= 3
-      && !("generatorContract" in practice),
-    { task: practiceTask, bytes: serializedBytes(practice) },
-  );
-  check(
-    "learning.misconception_adaptation",
-    "learning",
-    "Failed practice creates a structured misconception that changes adaptive difficulty and formats",
-    7,
-    (failedDerivativeAttempt.concept as Record<string, unknown>).mastery === 0
-      && practiceFocus.key === "derivatives"
-      && adaptiveMisconceptions.some((item) =>
-        item.text === "Confuses the chain rule with the product rule."
-        && item.occurrences === 1)
-      && (practiceTask.formats as string[]).includes("debug")
-      && practiceTask.difficulty === "introductory"
-      && practiceFocus.strategy === "misconception_repair",
-    { focus: practiceFocus, task: practiceTask },
-  );
-  check(
-    "context.practice_packet_budget",
-    "context",
-    "Adaptive practice packet stays bounded without a repeated generator contract",
-    7,
-    serializedBytes(practice) <= 6_500
-      && !("generatorContract" in practice)
-      && (practice.evidence as unknown[]).length > 0,
-    { bytes: serializedBytes(practice), keys: Object.keys(practice) },
-  );
-  check(
-    "context.no_repeated_contracts",
-    "context",
-    "Common answer and practice payloads do not repeat static prose contracts",
-    5,
-    !("answerContract" in groundedKnown)
-      && !("generatorContract" in practice),
-    {
-      answerKeys: Object.keys(groundedKnown),
-      practiceKeys: Object.keys(practice),
-    },
-  );
-
-  const createdCards = await tool(client, "create_flashcards", {
-    cards: [{
-      front: "What controls the step size in gradient descent?",
-      back: "The learning rate.",
-      conceptId: "gradient-descent",
-      sourceIds: [optimizationSourceId],
-      tags: ["optimization"],
-    }],
-  });
-  const cardId = String((createdCards.cardIds as unknown[])[0]);
-  const dueBefore = await tool(client, "get_review_queue");
-  const queuedCard = (dueBefore.cards as Array<Record<string, unknown>>)[0]!;
-  const revealedCard = await tool(client, "get_review_queue", {
-    cardId,
-    includeBack: true,
-  });
-  const review = await tool(client, "record_review", {
-    cardId,
-    grade: 5,
-    elapsedMs: 4200,
-  });
-  const reviewedConcept = review.concept as Record<string, unknown>;
-  check(
-    "review.schedule_mastery",
-    "learning",
-    "Review scheduling advances due time and updates concept mastery",
-    6,
-    (dueBefore.cards as unknown[]).length === 1
-      && !("back" in queuedCard)
-      && ((revealedCard.cards as Array<Record<string, unknown>>)[0]?.back === "The learning rate.")
-      && Number(review.intervalDays) === 1
-      && Number(reviewedConcept.mastery) > 0.3
-      && Number(reviewedConcept.mastery) < 0.4
-      && Number(reviewedConcept.attempts) === 1,
-    { queue: dueBefore, revealed: revealedCard, review },
-  );
-  check(
-    "context.review_queue_minimal",
-    "context",
-    "Default review queue returns one front without leaking backs; one exact lookup reveals only the attempted answer",
-    5,
-    (dueBefore.cards as unknown[]).length === 1
-      && !("back" in queuedCard)
-      && (revealedCard.cards as unknown[]).length === 1
-      && serializedBytes(dueBefore) <= 1_500,
-    { bytes: serializedBytes(dueBefore), queue: dueBefore },
-  );
-  const masteryTrajectory = [Number(reviewedConcept.mastery)];
-  const confidenceTrajectory = [Number(reviewedConcept.confidence)];
-  for (const grade of [5, 5, 5, 5, 0]) {
-    const nextReview = await tool(client, "record_review", {
-      cardId,
-      grade,
-      elapsedMs: 4000,
-    });
-    const concept = nextReview.concept as Record<string, unknown>;
-    masteryTrajectory.push(Number(concept.mastery));
-    confidenceTrajectory.push(Number(concept.confidence));
-  }
-  const successesRiseGradually = masteryTrajectory
-    .slice(0, 5)
-    .every((value, index, values) =>
-      index === 0 || value > values[index - 1]!);
-  const confidenceNeverFalls = confidenceTrajectory.every((value, index, values) =>
-    index === 0 || value >= values[index - 1]!);
-  check(
-    "learning.longitudinal_mastery",
-    "learning",
-    "Mastery accumulates across repeated success, confidence follows evidence, and later failure lowers the estimate",
-    7,
-    successesRiseGradually
-      && masteryTrajectory.slice(0, 5).every((value) => value < 0.8)
-      && masteryTrajectory.at(-1)! < masteryTrajectory.at(-2)!
-      && confidenceNeverFalls,
-    { masteryTrajectory, confidenceTrajectory },
-  );
-  const bulkCards = await tool(client, "create_flashcards", {
-    cards: Array.from({ length: 49 }, (_, index) => ({
-      front: `Scaled recall prompt ${index + 1}`,
-      back: `Scaled grounded answer ${index + 1}`,
-      conceptId: "gradient-descent",
-      sourceIds: [optimizationSourceId],
-    })),
-  });
-  check(
-    "context.bulk_write_delta",
-    "context",
-    "Bulk flashcard writes return IDs and one due timestamp without echoing card content",
-    5,
-    bulkCards.created === 49
-      && (bulkCards.cardIds as unknown[]).length === 49
-      && !("cards" in bulkCards)
-      && serializedBytes(bulkCards) <= 3_500,
-    { bytes: serializedBytes(bulkCards), keys: Object.keys(bulkCards) },
-  );
-
-  const concurrentGoalCount = 32;
-  const concurrentGoalWrites = await Promise.all(Array.from(
-    { length: concurrentGoalCount },
-    (_, index) => tool(client!, "set_study_goal", {
-      title: `Concurrent persistence goal ${index}`,
-      conceptIds: [],
-      targetMastery: 0.75,
-      minutesPerWeek: 30,
-    }),
-  ));
-  const concurrentGoalIds = concurrentGoalWrites.map((result) =>
-    String((result.goal as Record<string, unknown>).id));
-  const concurrencyDashboard = await jsonResource(client, "study://dashboard");
-  const concurrencyCounts = concurrencyDashboard.counts as Record<string, unknown>;
-  check(
-    "persistence.concurrent_tool_writes",
-    "persistence",
-    "Parallel MCP mutations preserve every independent write",
-    8,
-    new Set(concurrentGoalIds).size === concurrentGoalCount
-      && concurrencyCounts.activeGoals === concurrentGoalCount,
-    {
-      requested: concurrentGoalCount,
-      uniqueIds: new Set(concurrentGoalIds).size,
-      counts: concurrencyCounts,
-    },
-  );
-
-  await tool(client, "set_study_goal", {
-    title: "Master optimization foundations",
-    conceptIds: ["gradient-descent", "derivatives"],
-    targetMastery: 0.85,
-    minutesPerWeek: 180,
-  });
-  const plan = await tool(client, "plan_study_session", { minutes: 50 });
-  const blocks = plan.blocks as Array<Record<string, unknown>>;
-  check(
-    "planning.adaptive_blocks",
-    "learning",
-    "Study plan combines retrieval, weak-concept repair, interleaving, and reflection",
-    5,
-    blocks.length >= 3
-      && blocks.some((block) => block.activity === "Interleaved practice")
-      && plan.activeGoalCount === concurrentGoalCount + 1
-      && (plan.activeGoals as unknown[]).length <= 3
-      && (plan.priorityConcepts as unknown[]).length >= 1
-      && !("weakestConcepts" in plan)
-      && serializedBytes(plan) <= 4_500,
-    { bytes: serializedBytes(plan), blocks: blocks.map((block) => block.activity) },
-  );
-  const priorityConcepts = plan.priorityConcepts as Array<Record<string, unknown>>;
-  const topMisconceptions = priorityConcepts[0]?.activeMisconceptions as Array<Record<string, unknown>>;
-  const misconceptionId = String(topMisconceptions[0]?.id);
-  const resolvedMisconception = await tool(client, "resolve_misconception", {
-    conceptId: "derivatives",
-    misconceptionId,
-  });
-  check(
-    "learning.misconception_resolution",
-    "learning",
-    "Adaptive planning surfaces the recurring misconception and resolution removes it from active priority",
-    4,
-    String(blocks.find((block) => block.activity === "Repair the highest-priority concept")?.action)
-      .includes("Confuses the chain rule")
-      && Boolean((resolvedMisconception.misconception as Record<string, unknown>).resolvedAt),
-    { topPriority: priorityConcepts[0], resolvedMisconception },
-  );
   const reconnected = await createStudyServer(vault);
   const reconnectedClient = new Client({
     name: "metis-reset-evaluator",
@@ -909,24 +663,17 @@ try {
       arguments: { query: "differentiation" },
     }));
     const resumedConcept = (resumedLookup.concepts as Array<Record<string, unknown>>)[0]!;
-    const resumedLearner = resumedConcept.learner as Record<string, unknown>;
-    const resumedPlan = objectContent(await reconnectedClient.callTool({
-      name: "plan_study_session",
-      arguments: { minutes: 30 },
-    }));
     check(
       "context.transcript_independent_resume",
       "context",
-      "A fresh MCP client reconstructs learner state and next study decisions without prior transcript",
+      "A fresh MCP client routes to the right concept capsule without prior transcript",
       8,
       resumedConcept.key === "derivatives"
-        && Number(resumedLearner.attempts) >= 1
-        && (resumedPlan.priorityConcepts as unknown[]).length >= 1
+        && typeof resumedConcept.summary === "string"
         && serializedBytes(resumedLookup) <= 2_500,
       {
         lookupBytes: serializedBytes(resumedLookup),
         concept: resumedConcept,
-        planBytes: serializedBytes(resumedPlan),
       },
     );
   } finally {
@@ -977,15 +724,11 @@ try {
   check(
     "progress.dashboard_resource",
     "learning",
-    "Dashboard resource reflects sources, concepts, cards, reviews, and active goals",
+    "Dashboard resource reflects sources, wiki pages, and concepts",
     5,
     dashboardCounts.sources === 9
       && dashboardCounts.concepts === 27
-      && dashboardCounts.cards === 50
-      && dashboardCounts.activeGoals === concurrentGoalCount + 1
-      && dashboardCounts.reviews === 6
-      && (dashboard.recentReviews as unknown[]).length === 5
-      && (dashboard.activeGoals as unknown[]).length <= 3
+      && typeof dashboardCounts.wikiPages === "number"
       && Buffer.byteLength(dashboardText) <= 3_000,
     dashboard,
   );
@@ -1000,17 +743,15 @@ try {
   check(
     "progress.knowledge_graph",
     "learning",
-    "Bounded graph neighborhoods connect concepts to evidence and goals while displaying mastery",
+    "Bounded graph neighborhoods connect concepts to their supporting evidence",
     5,
     graph.truncated === true
       && (graph.nodes as unknown[]).length <= 30
       && serializedBytes(graph) <= 12_000
       && !("mermaid" in graph)
-      && graphNodes.some((node) => node.type === "concept" && node.mastery !== undefined)
+      && graphNodes.some((node) => node.type === "concept")
       && graphNodes.some((node) => node.type === "source")
-      && graphNodes.some((node) => node.type === "goal")
       && graphEdges.some((edge) => edge.type === "supported_by")
-      && graphEdges.some((edge) => edge.type === "targets")
       && String(focusedGraph.mermaid).startsWith("flowchart LR"),
     {
       globalBytes: serializedBytes(graph),
@@ -1020,89 +761,33 @@ try {
     },
   );
 
-  const mathKnown = await tool(client, "verify_math", {
-    expression: "(17/3)^2 + sqrt(2)",
-    precision: 40,
-  });
-  const mathResult = mathKnown.result as Record<string, unknown>;
+  const concurrentIngestCount = 12;
+  const concurrentIngests = await Promise.all(Array.from(
+    { length: concurrentIngestCount },
+    (_, index) => tool(client!, "ingest_source", {
+      title: `Concurrent persistence source ${index}`,
+      content: `Distinct evidence body number ${index} for the parallel write probe.`,
+    }),
+  ));
+  const concurrentSourceIds = concurrentIngests.map((result) =>
+    String((result.source as Record<string, unknown>).id));
+  const concurrencyDashboard = await jsonResource(client, "study://dashboard");
+  const concurrencyCounts = concurrencyDashboard.counts as Record<string, unknown>;
   check(
-    "math.known_answer",
-    "math",
-    "Python verifier returns an accurate known numerical result",
-    6,
-    mathKnown.ok === true
-      && Math.abs(Number(mathResult.decimal) - 33.525324673484206) < 1e-14
-      && String(mathKnown.verifiedBy).includes("Python"),
-    mathKnown,
-  );
-  const mathSolve = await tool(client, "verify_math", {
-    operation: "solve",
-    expression: "2*x + 3 = 17",
-    solveFor: "x",
-  });
-  check(
-    "math.equation_solve",
-    "math",
-    "Equation solving returns a verified exact result",
-    3,
-    mathSolve.ok === true
-      && (mathSolve.solutions as Array<Record<string, unknown>>)[0]?.exact === "7",
-    mathSolve,
-  );
-  const largeMath = await tool(client, "verify_math", {
-    expression: `${"9".repeat(700)}*${"9".repeat(700)}`,
-  });
-  check(
-    "context.math_result_budget",
-    "context",
-    "Large valid exact results are bounded without echoing verifier inputs",
-    5,
-    largeMath.ok === true
-      && largeMath.truncated === true
-      && !("expression" in largeMath)
-      && !("variables" in largeMath)
-      && serializedBytes(largeMath) <= 4_000,
-    { bytes: serializedBytes(largeMath), keys: Object.keys(largeMath) },
-  );
-  const malicious = await tool(client, "verify_math", {
-    expression: "__import__('os').system('echo unsafe')",
-  });
-  check(
-    "math.reject_code_execution",
-    "math",
-    "Expression grammar rejects Python code execution and attribute access",
-    4,
-    malicious.ok === false
-      && String(malicious.error).toLowerCase().includes("allowed"),
-    malicious,
+    "persistence.concurrent_tool_writes",
+    "persistence",
+    "Parallel MCP mutations preserve every independent write",
+    8,
+    new Set(concurrentSourceIds).size === concurrentIngestCount
+      && Number(concurrencyCounts.sources) >= concurrentIngestCount,
+    {
+      requested: concurrentIngestCount,
+      uniqueIds: new Set(concurrentSourceIds).size,
+      counts: concurrencyCounts,
+    },
   );
 
-  const rendered = await tool(client, "render_math_pdf", {
-    title: "Verified Derivative",
-    outputName: "eval-verified-derivative",
-    latexBody: String.raw`\section*{Power Rule}
-For \(f(x)=x^3\), the power rule gives
-\[
-f'(x)=3x^2.
-\]
-\begin{align*}
-f'(2)&=3(2)^2\\
-&=12.
-\end{align*}`,
-  });
-  const pdfBytes = await readFile(String(rendered.pdfPath));
-  const texSource = await readFile(String(rendered.texPath), "utf8");
-  check(
-    "pdf.real_pdf",
-    "pdf",
-    "MCP compiles a real AMS-math PDF and preserves controlled TeX source",
-    7,
-    pdfBytes.subarray(0, 5).toString() === "%PDF-"
-      && pdfBytes.byteLength > 1000
-      && !texSource.includes("\\write18")
-      && texSource.includes("\\usepackage{amsmath,amssymb,mathtools}"),
-    { bytes: pdfBytes.byteLength, compiler: rendered.compiler },
-  );
+
 } catch (error) {
   check(
     "suite.unhandled_error",

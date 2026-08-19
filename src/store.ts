@@ -50,9 +50,6 @@ const EMPTY_STATE: StudyState = {
   sources: [],
   wikiPages: [],
   concepts: [],
-  cards: [],
-  reviews: [],
-  goals: [],
 };
 
 export interface VaultInspection {
@@ -129,7 +126,6 @@ export class StudyStore {
     await Promise.all([
       mkdir(path.join(this.root, "raw"), { recursive: true }),
       mkdir(path.join(this.root, "wiki"), { recursive: true }),
-      mkdir(path.join(this.root, "exports"), { recursive: true }),
       mkdir(this.metadataDir, { recursive: true }),
       mkdir(path.join(this.metadataDir, "cache", "search-v1"), {
         recursive: true,
@@ -138,7 +134,6 @@ export class StudyStore {
     await Promise.all([
       safeExistingPath(this.root, "raw"),
       safeExistingPath(this.root, "wiki"),
-      safeExistingPath(this.root, "exports"),
       safeExistingPath(this.root, ".metis"),
       safeExistingPath(this.root, ".metis/cache/search-v1"),
     ]);
@@ -166,7 +161,6 @@ export class StudyStore {
           name: name?.trim() || path.basename(this.root) || "Study Vault",
           createdAt: nowIso(),
           groundingDefault: "sources_first",
-          dailyReviewLimit: 30,
         };
         await this.writeConfigFile(config);
       }
@@ -193,7 +187,7 @@ export class StudyStore {
     return this.readConfigFile();
   }
 
-  async updateConfig(update: Partial<Pick<StudyConfig, "name" | "groundingDefault" | "dailyReviewLimit">>): Promise<StudyConfig> {
+  async updateConfig(update: Partial<Pick<StudyConfig, "name" | "groundingDefault">>): Promise<StudyConfig> {
     await this.initialize();
     return this.enqueueWrite(async () => {
       const current = await this.readConfigFile();
@@ -494,7 +488,7 @@ export class StudyStore {
         `Validated backup '${backupRelativePath}'.`,
         `Restore state schema v${backup.stateVersion} and config schema v${backup.configVersion}.`,
         "Replace managed state, configuration, and wiki files.",
-        "Preserve raw sources and exports without modification.",
+        "Preserve raw sources without modification.",
       ];
       if (options.dryRun) {
         return {
@@ -517,7 +511,7 @@ export class StudyStore {
       await this.appendLogFile("restore", "Metis vault backup restored", [
         `Restored from: \`${backupRelativePath}\``,
         `Recovery backup of replaced files: \`${recoveryBackupRelativePath}\``,
-        "Raw sources and exports were not modified.",
+        "Raw sources were not modified.",
       ]);
       return {
         restored: true,
@@ -639,7 +633,7 @@ export class StudyStore {
         stateVersion,
         configVersion,
         includes: ["state.json", "config.json", "wiki/"],
-        excludes: ["raw/", "exports/"],
+        excludes: ["raw/"],
         files: await this.backupChecksums(backupRoot),
       }, null, 2)}\n`,
     );
@@ -743,47 +737,13 @@ export class StudyStore {
 
   async dashboard(): Promise<Dashboard> {
     const state = await this.readState();
-    const now = Date.now();
-    const concepts = [...state.concepts].sort((a, b) => a.mastery - b.mastery);
-    const average = concepts.length === 0
-      ? 0
-      : concepts.reduce((total, concept) => total + concept.mastery, 0) / concepts.length;
     return {
       generatedAt: nowIso(),
       counts: {
         sources: state.sources.length,
         wikiPages: state.wikiPages.length,
         concepts: state.concepts.length,
-        cards: state.cards.length,
-        dueCards: state.cards.filter((card) => !card.suspended && Date.parse(card.dueAt) <= now).length,
-        reviews: state.reviews.length,
-        activeGoals: state.goals.filter((goal) => goal.status === "active").length,
       },
-      mastery: {
-        average: Number(average.toFixed(3)),
-        weakest: concepts.slice(0, 3).map(({ id, title, mastery, attempts }) => ({
-          id,
-          title: title.slice(0, 200),
-          mastery,
-          attempts,
-        })),
-      },
-      recentReviews: state.reviews.slice(-5).reverse().map((review) => ({
-        cardId: review.cardId,
-        grade: review.grade,
-        reviewedAt: review.reviewedAt,
-        ...(review.elapsedMs !== undefined ? { elapsedMs: review.elapsedMs } : {}),
-      })),
-      activeGoals: state.goals
-        .filter((goal) => goal.status === "active")
-        .sort((a, b) => (a.deadline ?? "9999").localeCompare(b.deadline ?? "9999"))
-        .slice(0, 3)
-        .map(({ id, title, targetMastery, deadline }) => ({
-          id,
-          title: title.slice(0, 200),
-          targetMastery,
-          ...(deadline ? { deadline } : {}),
-        })),
     };
   }
 
@@ -793,28 +753,12 @@ export class StudyStore {
     includeMermaid?: boolean;
   } = {}): Promise<KnowledgeGraph> {
     const state = await this.readState();
-    const now = Date.now();
     const nodes: KnowledgeGraph["nodes"] = [
-      ...state.concepts.map((concept) => {
-        const dueCards = state.cards.filter((card) =>
-          card.conceptId === concept.id
-          && !card.suspended
-          && Date.parse(card.dueAt) <= now).length;
-        return {
-          id: concept.id,
-          type: "concept" as const,
-          label: concept.title.slice(0, 120),
-          mastery: concept.mastery,
-          ...(dueCards > 0 ? { dueCards } : {}),
-        };
-      }),
-      ...state.goals
-        .filter((goal) => goal.status === "active")
-        .map((goal) => ({
-          id: goal.id,
-          type: "goal" as const,
-          label: goal.title.slice(0, 120),
-        })),
+      ...state.concepts.map((concept) => ({
+        id: concept.id,
+        type: "concept" as const,
+        label: concept.title.slice(0, 120),
+      })),
       ...state.sources.map((source) => ({
         id: source.id,
         type: "source" as const,
@@ -830,11 +774,6 @@ export class StudyStore {
       }
       for (const sourceId of page.sourceIds) {
         edges.push({ from: page.slug, to: sourceId, type: "supported_by" });
-      }
-    }
-    for (const goal of state.goals.filter((candidate) => candidate.status === "active")) {
-      for (const conceptId of goal.conceptIds) {
-        edges.push({ from: goal.id, to: conceptId, type: "targets" });
       }
     }
     const limit = clamp(Math.round(options.limit ?? 30), 1, 75);
@@ -1163,11 +1102,7 @@ function renderMermaidGraph(
 ): string {
   const identifiers = new Map(nodes.map((node, index) => [node.id, `n${index}`]));
   const mermaidNodes = nodes.map((node) => {
-    const detail = node.type === "concept"
-      ? ` · ${Math.round((node.mastery ?? 0) * 100)}% mastery${node.dueCards ? ` · ${node.dueCards} due` : ""}`
-      : node.type === "goal"
-        ? " · active goal"
-        : " · source";
+    const detail = node.type === "concept" ? " · concept" : " · source";
     return `  ${identifiers.get(node.id)}["${mermaidLabel(`${node.label}${detail}`)}"]:::${node.type}`;
   });
   const mermaidEdges = edges.flatMap((edge) => {

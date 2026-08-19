@@ -5,7 +5,6 @@
     "protocol.required_tools",
     "migration.backup_roundtrip",
     "migration.restore_roundtrip",
-    "persistence.concurrent_tool_writes",
     "context.keyed_concept_lookup",
     "context.single_wire_payload",
     "context.protocol_surface_budget",
@@ -13,77 +12,111 @@
     "context.bounded_resources",
     "context.source_search_budget",
     "context.grounded_packet_budget",
-    "context.practice_packet_budget",
-    "context.no_repeated_contracts",
-    "context.review_queue_minimal",
-    "context.bulk_write_delta",
     "context.transcript_independent_resume",
     "context.bounded_maintenance_page",
-    "learning.misconception_adaptation",
-    "learning.longitudinal_mastery",
     "grounding.facet_coverage",
     "grounding.prompt_injection_boundary",
     "grounding.conflicting_sources",
     "grounding.strict_no_external",
-    "math.known_answer",
-    "context.math_result_budget",
-    "math.reject_code_execution",
-    "pdf.real_pdf"
+    "persistence.concurrent_tool_writes"
   ],
   "retrievalCases": [
     {
       "query": "What controls the step size in gradient descent?",
-      "expectedTerms": ["learning rate", "step size"],
+      "expectedTerms": [
+        "learning rate",
+        "step size"
+      ],
       "expectedTitle": "Optimization"
     },
     {
       "query": "How do I differentiate a composition?",
-      "expectedTerms": ["chain rule", "outer function", "inner function"],
+      "expectedTerms": [
+        "chain rule",
+        "outer function",
+        "inner function"
+      ],
       "expectedTitle": "Differential Calculus"
     },
     {
       "query": "How can critical points identify extrema?",
-      "expectedTerms": ["critical points", "sign of the derivative", "local maximum or minimum"],
+      "expectedTerms": [
+        "critical points",
+        "sign of the derivative",
+        "local maximum or minimum"
+      ],
       "expectedTitle": "Differential Calculus"
     },
     {
       "query": "How does the mitochondrial proton gradient produce ATP?",
-      "expectedTerms": ["proton gradient", "ATP synthase", "phosphorylate ADP"],
+      "expectedTerms": [
+        "proton gradient",
+        "ATP synthase",
+        "phosphorylate ADP"
+      ],
       "expectedTitle": "Cell Biology and Genetics"
     },
     {
       "query": "What direction does RNA polymerase synthesize RNA?",
-      "expectedTerms": ["RNA polymerase", "5-prime to 3-prime", "template strand"],
+      "expectedTerms": [
+        "RNA polymerase",
+        "5-prime to 3-prime",
+        "template strand"
+      ],
       "expectedTitle": "Cell Biology and Genetics"
     },
     {
       "query": "Why is binary search logarithmic?",
-      "expectedTerms": ["sorted sequence", "discards half", "logarithmic"],
+      "expectedTerms": [
+        "sorted sequence",
+        "discards half",
+        "logarithmic"
+      ],
       "expectedTitle": "Algorithms and Data Structures"
     },
     {
       "query": "How can a hash table handle collisions?",
-      "expectedTerms": ["hash collision", "separate chaining", "open addressing"],
+      "expectedTerms": [
+        "hash collision",
+        "separate chaining",
+        "open addressing"
+      ],
       "expectedTitle": "Algorithms and Data Structures"
     },
     {
       "query": "When is demand price elastic?",
-      "expectedTerms": ["percentage change", "absolute value", "greater than one"],
+      "expectedTerms": [
+        "percentage change",
+        "absolute value",
+        "greater than one"
+      ],
       "expectedTitle": "Introductory Economics"
     },
     {
       "query": "Does comparative advantage require higher absolute productivity?",
-      "expectedTerms": ["lower opportunity cost", "not absolute productivity", "gains from trade"],
+      "expectedTerms": [
+        "lower opportunity cost",
+        "not absolute productivity",
+        "gains from trade"
+      ],
       "expectedTitle": "Introductory Economics"
     },
     {
       "query": "Which agreement established the European Coal and Steel Community?",
-      "expectedTerms": ["Treaty of Paris", "1951", "European Coal and Steel Community"],
+      "expectedTerms": [
+        "Treaty of Paris",
+        "1951",
+        "European Coal and Steel Community"
+      ],
       "expectedTitle": "European Integration"
     },
     {
       "query": "What was created by the Maastricht Treaty?",
-      "expectedTerms": ["Maastricht Treaty", "European Union", "1992"],
+      "expectedTerms": [
+        "Maastricht Treaty",
+        "European Union",
+        "1992"
+      ],
       "expectedTitle": "European Integration"
     }
   ],

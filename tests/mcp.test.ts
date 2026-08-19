@@ -51,15 +51,11 @@ describe("MCP surface", () => {
         "list_metis_backups",
         "upsert_wiki_page",
         "prepare_grounded_answer",
-        "prepare_practice",
-        "record_review",
-        "resolve_misconception",
-        "plan_study_session",
-        "verify_math",
-        "render_math_pdf",
+        "search_knowledge",
+        "get_knowledge_graph",
         "lint_wiki",
       ]));
-      expect(names.length).toBeGreaterThanOrEqual(16);
+      expect(names).toHaveLength(10);
 
       const repairPreview = await client.callTool({
         name: "metis_repair",
@@ -68,7 +64,7 @@ describe("MCP surface", () => {
       expect(toolObject(repairPreview)).toEqual(expect.objectContaining({
         dryRun: true,
         repaired: false,
-        migration: expect.objectContaining({ targetStateVersion: 3 }),
+        migration: expect.objectContaining({ targetStateVersion: 4 }),
       }));
 
       const ingested = await client.callTool({
@@ -130,9 +126,7 @@ describe("MCP surface", () => {
 
       const prompts = await client.listPrompts();
       expect(prompts.prompts.map((prompt) => prompt.name)).toEqual(expect.arrayContaining([
-        "learn-topic",
-        "adaptive-study-session",
-        "verified-math-solution",
+        "grounded-explanation",
       ]));
     } finally {
       await client.close();

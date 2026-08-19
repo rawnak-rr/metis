@@ -5,8 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { KnowledgeService } from "../src/knowledge.js";
-import { LearningService } from "../src/learning.js";
-import { MathService } from "../src/math.js";
+import { GroundingService } from "../src/grounding.js";
 import { RepairService } from "../src/repair.js";
 import { syncMetisSkills } from "../src/skills.js";
 import { StudyStore } from "../src/store.js";
@@ -20,9 +19,8 @@ async function fixture() {
   const store = new StudyStore(root);
   await store.initialize("Test Vault");
   const knowledge = new KnowledgeService(store);
-  const learning = new LearningService(store, knowledge);
-  const math = new MathService(store);
-  return { root, store, knowledge, learning, math };
+  const grounding = new GroundingService(store, knowledge);
+  return { root, store, knowledge, grounding };
 }
 
 afterEach(async () => {
@@ -33,7 +31,7 @@ afterEach(async () => {
 
 describe("knowledge and grounding", () => {
   it("ingests immutable evidence, compiles a wiki page, and retrieves line citations", async () => {
-    const { root, store, knowledge, learning } = await fixture();
+    const { root, store, knowledge, grounding } = await fixture();
     const ingested = await knowledge.ingest({
       title: "Gradient Descent Notes",
       tags: ["optimization"],
@@ -89,7 +87,7 @@ describe("knowledge and grounding", () => {
       match: "alias",
     }));
 
-    const packet = await learning.prepareAnswer("What controls the gradient descent step size?", "sources_only");
+    const packet = await grounding.prepareAnswer("What controls the gradient descent step size?", "sources_only");
     expect(packet.groundingMode).toBe("sources_only");
     expect(packet.coverage).toBe("sufficient");
     expect(packet.facets).toEqual([
@@ -102,7 +100,7 @@ describe("knowledge and grounding", () => {
     expect(packet.evidence.every((item) => item.sourceId === ingested.source.id)).toBe(true);
     expect(packet).not.toHaveProperty("answerContract");
 
-    const followUp = await learning.prepareAnswer(
+    const followUp = await grounding.prepareAnswer(
       "Which parameter controls the gradient descent update step size?",
       "sources_only",
       3,
@@ -121,7 +119,7 @@ describe("knowledge and grounding", () => {
   });
 
   it("reports support separately for each required answer facet", async () => {
-    const { knowledge, learning } = await fixture();
+    const { knowledge, grounding } = await fixture();
     await knowledge.ingest({
       title: "Short Optimization Note",
       content: [
@@ -130,7 +128,7 @@ describe("knowledge and grounding", () => {
       ].join("\n"),
     });
 
-    const packet = await learning.prepareAnswer(
+    const packet = await grounding.prepareAnswer(
       "What controls the gradient descent step size, and what happens when it is too large?",
       "sources_only",
       3,
@@ -161,7 +159,7 @@ describe("knowledge and grounding", () => {
     ]);
     expect(packet.evidence).toHaveLength(1);
 
-    const automatic = await learning.prepareAnswer(
+    const automatic = await grounding.prepareAnswer(
       "What controls the gradient descent step size, and what happens when it is too large?",
       "sources_only",
       3,
@@ -173,7 +171,7 @@ describe("knowledge and grounding", () => {
   });
 
   it("marks incompatible numeric evidence as a conflicting facet", async () => {
-    const { knowledge, learning } = await fixture();
+    const { knowledge, grounding } = await fixture();
     await knowledge.ingest({
       title: "Protocol Zephyr A",
       content: "Protocol Zephyr requires a 15-minute observation interval.",
@@ -183,7 +181,7 @@ describe("knowledge and grounding", () => {
       content: "Protocol Zephyr requires a 30-minute observation interval.",
     });
 
-    const packet = await learning.prepareAnswer(
+    const packet = await grounding.prepareAnswer(
       "What observation interval does Protocol Zephyr require?",
       "sources_only",
       3,
@@ -335,7 +333,7 @@ describe("knowledge and grounding", () => {
   });
 
   it("deduplicates overlapping chunks before judging evidence coverage", async () => {
-    const { knowledge, learning } = await fixture();
+    const { knowledge, grounding } = await fixture();
     const lines = Array.from(
       { length: 40 },
       (_, index) => index === 24
@@ -353,7 +351,7 @@ describe("knowledge and grounding", () => {
       && item.text.includes("quasar flux capacitor"));
     expect(matchingSourceChunks).toHaveLength(1);
 
-    const packet = await learning.prepareAnswer(
+    const packet = await grounding.prepareAnswer(
       "quasar flux capacitor",
       "sources_only",
       8,
@@ -364,7 +362,7 @@ describe("knowledge and grounding", () => {
   });
 
   it("does not count a repeated support sentence twice when spans do not overlap", async () => {
-    const { knowledge, learning } = await fixture();
+    const { knowledge, grounding } = await fixture();
     const repeated = "A lunar eigenvector compass is calibrated exactly once.";
     const lines = Array.from({ length: 60 }, (_, index) =>
       index === 5 || index === 42
@@ -377,7 +375,7 @@ describe("knowledge and grounding", () => {
 
     const results = await knowledge.search("lunar eigenvector compass", 6);
     expect(results.filter((item) => item.text.includes(repeated))).toHaveLength(1);
-    const packet = await learning.prepareAnswer(
+    const packet = await grounding.prepareAnswer(
       "lunar eigenvector compass",
       "sources_only",
       6,
@@ -483,21 +481,18 @@ describe("vault persistence and updates", () => {
     await Promise.all(Array.from({ length: 25 }, (_, index) => {
       const target = index % 2 === 0 ? store : secondStore;
       return target.mutate((state) => {
-        state.goals.push({
-          id: `goal_concurrent_${index}`,
-          title: `Concurrent goal ${index}`,
-          conceptIds: [],
-          targetMastery: 0.8,
-          minutesPerWeek: 60,
-          status: "active",
-          createdAt: new Date().toISOString(),
+        state.concepts.push({
+          id: `concept_concurrent_${index}`,
+          title: `Concurrent concept ${index}`,
+          notes: [],
+          sourceIds: [],
         });
       });
     }));
 
     const state = await store.readState();
-    expect(state.goals).toHaveLength(25);
-    expect(new Set(state.goals.map((goal) => goal.id)).size).toBe(25);
+    expect(state.concepts).toHaveLength(25);
+    expect(new Set(state.concepts.map((concept) => concept.id)).size).toBe(25);
   });
 
   it("preserves every concurrent operation-log entry", async () => {
@@ -525,19 +520,16 @@ describe("vault persistence and updates", () => {
     await utimes(lockPath, staleTime, staleTime);
 
     await store.mutate((state) => {
-      state.goals.push({
-        id: "goal_after_stale_lock",
+      state.concepts.push({
+        id: "concept_after_stale_lock",
         title: "Recovered mutation",
-        conceptIds: [],
-        targetMastery: 0.8,
-        minutesPerWeek: 60,
-        status: "active",
-        createdAt: new Date().toISOString(),
+        notes: [],
+        sourceIds: [],
       });
     });
 
-    expect((await store.readState()).goals.map((goal) => goal.id))
-      .toContain("goal_after_stale_lock");
+    expect((await store.readState()).concepts.map((concept) => concept.id))
+      .toContain("concept_after_stale_lock");
   });
 
   it("migrates an unversioned vault through a dry-run and backed-up update", async () => {
@@ -577,6 +569,7 @@ describe("vault persistence and updates", () => {
       "Migrated state schema v0 → v1.",
       "Migrated state schema v1 → v2.",
       "Migrated state schema v2 → v3.",
+      "Migrated state schema v3 → v4.",
       "Migrated config schema v0 → v1.",
     ]));
     expect(JSON.parse(await readFile(path.join(root, ".metis", "state.json"), "utf8")))
@@ -584,10 +577,10 @@ describe("vault persistence and updates", () => {
 
     const updated = await reopened.updateVault();
     expect(updated.updated).toBe(true);
-    expect(updated.stateVersion).toBe(3);
+    expect(updated.stateVersion).toBe(4);
     expect(updated.configVersion).toBe(1);
     expect(updated.backupRelativePath).toMatch(/^\.metis\/backups\//);
-    expect(await reopened.readState()).toEqual(expect.objectContaining({ schemaVersion: 3 }));
+    expect(await reopened.readState()).toEqual(expect.objectContaining({ schemaVersion: 4 }));
     expect(await reopened.getConfig()).toEqual(expect.objectContaining({ schemaVersion: 1 }));
     await expect(readFile(rawSentinel, "utf8")).resolves.toBe("raw evidence is never migrated");
 
@@ -613,7 +606,7 @@ describe("vault persistence and updates", () => {
     await expect(reopened.updateVault()).rejects.toThrow(/refusing to downgrade/i);
   });
 
-  it("migrates v1 concept notes into structured misconception records", async () => {
+  it("migrates a v1 vault forward and drops learner state at v4", async () => {
     const { root, knowledge } = await fixture();
     const source = await knowledge.ingest({
       title: "Fractions",
@@ -642,22 +635,24 @@ describe("vault persistence and updates", () => {
     const preview = await reopened.updateVault({ dryRun: true });
     expect(preview.actions).toContain("Migrated state schema v1 → v2.");
     expect(preview.actions).toContain("Migrated state schema v2 → v3.");
+    expect(preview.actions).toContain("Migrated state schema v3 → v4.");
     await reopened.updateVault();
 
     const migrated = await reopened.readState();
-    expect(migrated.schemaVersion).toBe(3);
+    expect(migrated.schemaVersion).toBe(4);
     expect(migrated.wikiPages[0]!.aliases).toEqual([]);
     await expect(readFile(
       path.join(root, "wiki", "concepts", "fractions.md"),
       "utf8",
     )).resolves.toMatch(/aliases: \[\][\s\S]*A common denominator is required/);
-    expect(migrated.concepts[0]!.misconceptions).toEqual([
-      expect.objectContaining({
-        id: expect.stringMatching(/^mis_legacy_/),
-        text: "Adds denominators directly.",
-        occurrences: 1,
-      }),
-    ]);
+    expect(migrated.concepts[0]).toEqual({
+      id: "fractions",
+      title: "Fractions",
+      notes: ["Adds denominators directly."],
+      sourceIds: [source.source.id],
+    });
+    expect(migrated.concepts[0]).not.toHaveProperty("misconceptions");
+    expect(migrated).not.toHaveProperty("cards");
   });
 
   it("restores a managed-file backup without touching raw evidence", async () => {
@@ -665,27 +660,21 @@ describe("vault persistence and updates", () => {
     const rawPath = path.join(root, "raw", "restore-sentinel.txt");
     await writeFile(rawPath, "immutable across restore", "utf8");
     await store.mutate((state) => {
-      state.goals.push({
-        id: "goal_before_backup",
-        title: "Keep this goal",
-        conceptIds: [],
-        targetMastery: 0.8,
-        minutesPerWeek: 60,
-        status: "active",
-        createdAt: new Date().toISOString(),
+      state.concepts.push({
+        id: "concept_before_backup",
+        title: "Keep this concept",
+        notes: [],
+        sourceIds: [],
       });
     });
     const update = await store.updateVault();
     const backup = update.backupRelativePath!;
     await store.mutate((state) => {
-      state.goals.push({
-        id: "goal_after_backup",
+      state.concepts.push({
+        id: "concept_after_backup",
         title: "Remove this by restoring",
-        conceptIds: [],
-        targetMastery: 0.8,
-        minutesPerWeek: 60,
-        status: "active",
-        createdAt: new Date().toISOString(),
+        notes: [],
+        sourceIds: [],
       });
     });
 
@@ -694,15 +683,15 @@ describe("vault persistence and updates", () => {
       dryRun: true,
       restored: false,
       restoredFrom: backup,
-      stateVersion: 3,
+      stateVersion: 4,
     }));
-    expect((await store.readState()).goals).toHaveLength(2);
+    expect((await store.readState()).concepts).toHaveLength(2);
 
     const restored = await store.restoreVaultBackup(backup);
     expect(restored.restored).toBe(true);
     expect(restored.recoveryBackupRelativePath).toMatch(/^\.metis\/backups\//);
-    expect((await store.readState()).goals.map((goal) => goal.id))
-      .toEqual(["goal_before_backup"]);
+    expect((await store.readState()).concepts.map((concept) => concept.id))
+      .toEqual(["concept_before_backup"]);
     await expect(readFile(rawPath, "utf8")).resolves.toBe("immutable across restore");
     expect(await store.listVaultBackups()).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -840,7 +829,7 @@ describe("vault persistence and updates", () => {
       }),
     }));
     const repairedState = await reopened.readState();
-    expect(repairedState.schemaVersion).toBe(3);
+    expect(repairedState.schemaVersion).toBe(4);
     expect(repairedState.wikiPages[0]?.summary).toMatch(
       /^Recovered evidence: Mitochondria produce ATP/,
     );
@@ -851,9 +840,9 @@ describe("vault persistence and updates", () => {
       "utf8",
     )).resolves.toMatch(/Recovered verbatim evidence[\s\S]*Mitochondria produce ATP[\s\S]*\[src_.+#L1-L1]/);
     await expect(readFile(
-      path.join(root, ".metis", "skills", "metis-grounded-study", "SKILL.md"),
+      path.join(root, ".metis", "skills", "metis-grounded-answers", "SKILL.md"),
       "utf8",
-    )).resolves.toMatch(/^---\nname: metis-grounded-study\ndescription:/);
+    )).resolves.toMatch(/^---\nname: metis-grounded-answers\ndescription:/);
     await expect(readFile(
       path.join(root, ".metis", "skills", "metis-vault-maintenance", "agents", "openai.yaml"),
       "utf8",
@@ -989,150 +978,5 @@ describe("repair CLI", () => {
       path.join(root, ".metis", "skills", "manifest.json"),
       "utf8",
     )).resolves.toContain('"formatVersion": 1');
-  });
-});
-
-describe("adaptive review and planning", () => {
-  it("schedules reviews and updates mastery from honest grades", async () => {
-    const { knowledge, learning, store } = await fixture();
-    const source = await knowledge.ingest({ title: "Vectors", content: "A vector has magnitude and direction." });
-    await knowledge.upsertWikiPage({
-      title: "Vectors",
-      summary: "Objects with magnitude and direction.",
-      markdown: `# Vectors\n\nA vector has magnitude and direction. [${source.source.id}#L1-L1]`,
-      sourceIds: [source.source.id],
-    });
-    const [card] = await learning.createCards([{
-      front: "What defines a vector?",
-      back: "Magnitude and direction.",
-      conceptId: "vectors",
-      sourceIds: [source.source.id],
-    }]);
-    expect(card).toBeDefined();
-    expect(await learning.reviewQueue()).toHaveLength(1);
-
-    const failed = await learning.recordReview({ cardId: card!.id, grade: 1, note: "Forgot direction." });
-    expect(failed.card.lapses).toBe(1);
-    expect(failed.card.intervalDays).toBeCloseTo(0.04);
-    expect(failed.concept?.mastery).toBeCloseTo(0.067, 3);
-    expect(failed.concept?.misconceptions).toEqual([
-      expect.objectContaining({
-        text: "Forgot direction.",
-        occurrences: 1,
-      }),
-    ]);
-
-    const repairPractice = await learning.preparePractice({
-      topic: "Vectors",
-      count: 4,
-      difficulty: "adaptive",
-      includeSolutions: false,
-    });
-    expect(repairPractice.task).toEqual(expect.objectContaining({
-      difficulty: "introductory",
-      formats: expect.arrayContaining(["debug", "explain"]),
-      solutions: false,
-    }));
-    expect(repairPractice.focus).toEqual(expect.objectContaining({
-      key: "vectors",
-      strategy: "misconception_repair",
-      learner: expect.objectContaining({
-        activeMisconceptions: [
-          expect.objectContaining({ text: "Forgot direction." }),
-        ],
-      }),
-    }));
-    expect(repairPractice).not.toHaveProperty("generatorContract");
-
-    const passed = await learning.recordReview({ cardId: card!.id, grade: 5 });
-    expect(passed.card.repetitions).toBe(1);
-    expect(passed.card.intervalDays).toBe(1);
-    expect(passed.concept!.mastery).toBeGreaterThan(failed.concept!.mastery);
-    expect(passed.concept!.mastery).toBeLessThan(0.5);
-
-    const goal = await learning.setGoal({
-      title: "Master vectors",
-      conceptIds: ["vectors"],
-      targetMastery: 0.85,
-      minutesPerWeek: 120,
-    });
-    expect(goal.status).toBe("active");
-    const plan = await learning.planSession(45);
-    expect(plan.blocks).toBeInstanceOf(Array);
-    expect((plan.blocks as unknown[]).length).toBeGreaterThanOrEqual(3);
-    expect(JSON.stringify(plan)).toContain("Forgot direction.");
-    expect(plan.priorityConcepts).toEqual([
-      expect.objectContaining({
-        id: "vectors",
-        priorityScore: expect.any(Number),
-        activeMisconceptions: expect.arrayContaining([
-          expect.objectContaining({ text: "Forgot direction." }),
-        ]),
-      }),
-    ]);
-
-    const misconceptionId = failed.concept!.misconceptions[0]!.id;
-    const resolved = await learning.resolveMisconception({
-      conceptId: "vectors",
-      misconceptionId,
-    });
-    expect(resolved.resolvedAt).toBeDefined();
-    const resolvedPractice = await learning.preparePractice({
-      topic: "Vectors",
-      count: 3,
-      difficulty: "adaptive",
-      includeSolutions: false,
-    });
-    expect((resolvedPractice.focus as {
-      learner: { activeMisconceptions?: unknown[] };
-    }).learner.activeMisconceptions ?? [])
-      .toHaveLength(0);
-    const dashboard = await store.dashboard();
-    expect(dashboard.counts.activeGoals).toBe(1);
-  });
-});
-
-describe("verified mathematics and PDF output", () => {
-  it("evaluates and solves using the constrained Python process", async () => {
-    const { math } = await fixture();
-    const evaluated = await math.verify({
-      expression: "(17/3) ** 2 + sqrt(2)",
-      precision: 40,
-    });
-    expect(evaluated.ok).toBe(true);
-    expect(evaluated.result?.exact).toContain("sqrt(2)");
-    expect(evaluated.result?.decimal).toMatch(/^33\./);
-    expect(evaluated.verifiedBy).toContain("Python");
-
-    const solved = await math.verify({
-      operation: "solve",
-      expression: "2*x + 3 = 17",
-      solveFor: "x",
-    });
-    expect(solved.ok).toBe(true);
-    expect(solved.solutions?.[0]?.exact).toBe("7");
-
-    const rejected = await math.verify({ expression: "__import__('os').getcwd()" });
-    expect(rejected.ok).toBe(false);
-  });
-
-  it("compiles a real mathematical PDF and keeps its LaTeX source", async () => {
-    const { math } = await fixture();
-    const result = await math.renderPdf({
-      title: "Quadratic Formula",
-      outputName: "quadratic-formula",
-      latexBody: String.raw`\section*{Result}
-For \(ax^2+bx+c=0\), the solutions are
-\[
-x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}.
-\]
-\begin{align*}
-a(x-r_1)(x-r_2)&=0.
-\end{align*}`,
-    });
-    const pdf = await readFile(result.pdfPath);
-    expect(pdf.subarray(0, 5).toString()).toBe("%PDF-");
-    expect(result.bytes).toBeGreaterThan(1000);
-    await expect(readFile(result.texPath, "utf8")).resolves.toContain("\\usepackage{amsmath,amssymb,mathtools}");
   });
 });

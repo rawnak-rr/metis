@@ -4,6 +4,18 @@ All notable changes to Metis will be documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced Metis to a grounding kernel. Removed spaced repetition, practice generation,
+  mastery/confidence tracking, misconceptions, goals, session planning, constrained
+  mathematics, and LaTeX PDF output. The MCP surface is now 10 tools and one prompt.
+  Higher-level workflows are expected to build on the kernel rather than live inside it.
+- Split the former `LearningService` into `GroundingService`, which keeps grounded-answer
+  assembly, facet coverage, and evidence packets.
+- State schema v4 drops `cards`, `reviews`, and `goals`, and reduces concept records to
+  identity, notes, and source references. The v3 to v4 migration discards learner state.
+- Concept capsules no longer carry a learner overlay.
+
 ### Added
 
 - `metis_repair` CLI and MCP workflow with dry-run inspection, ordered migrations, checksummed rollback backups, generated knowledge repair, portable Agent Skill refresh, incremental/full search-index synchronization, downgrade refusal, and post-repair health reporting. `metis update` remains a CLI alias.

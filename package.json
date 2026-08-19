@@ -1,14 +1,13 @@
 {
   "name": "metis",
   "version": "0.1.0",
-  "description": "A local-first MCP study system for grounded learning, persistent wikis, practice, mastery tracking, and verified mathematical PDFs.",
+  "description": "A local-first MCP grounding kernel: immutable sources, checksum-verified retrieval, and bounded evidence packets over a persistent wiki.",
   "type": "module",
   "bin": {
     "metis": "dist/src/index.js"
   },
   "files": [
     "dist/src",
-    "python",
     "README.md",
     "CHANGELOG.md",
     "SECURITY.md",

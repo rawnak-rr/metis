@@ -27,7 +27,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes poppler-utils texlive-latex-base texlive-latex-extra
+          sudo apt-get install --yes poppler-utils
 
       - run: npm ci
       - run: npm run typecheck

@@ -5,7 +5,6 @@ export interface StudyConfig {
   name: string;
   createdAt: string;
   groundingDefault: GroundingMode;
-  dailyReviewLimit: number;
 }
 
 export interface SourceRecord {
@@ -30,73 +29,18 @@ export interface WikiPageRecord {
   updatedAt: string;
 }
 
-export interface MisconceptionRecord {
-  id: string;
-  text: string;
-  recordedAt: string;
-  occurrences: number;
-  resolvedAt?: string;
-}
-
 export interface ConceptRecord {
   id: string;
   title: string;
-  mastery: number;
-  confidence: number;
-  attempts: number;
-  correct: number;
-  lastStudiedAt?: string;
   notes: string[];
-  misconceptions: MisconceptionRecord[];
   sourceIds: string[];
-}
-
-export interface CardRecord {
-  id: string;
-  front: string;
-  back: string;
-  conceptId?: string;
-  sourceIds: string[];
-  tags: string[];
-  createdAt: string;
-  dueAt: string;
-  intervalDays: number;
-  easeFactor: number;
-  repetitions: number;
-  lapses: number;
-  suspended: boolean;
-}
-
-export interface ReviewRecord {
-  id: string;
-  cardId: string;
-  grade: number;
-  reviewedAt: string;
-  elapsedMs?: number;
-  note?: string;
-  previousIntervalDays: number;
-  nextIntervalDays: number;
-}
-
-export interface GoalRecord {
-  id: string;
-  title: string;
-  conceptIds: string[];
-  targetMastery: number;
-  deadline?: string;
-  minutesPerWeek: number;
-  status: "active" | "completed" | "paused";
-  createdAt: string;
 }
 
 export interface StudyState {
-  schemaVersion: 3;
+  schemaVersion: 4;
   sources: SourceRecord[];
   wikiPages: WikiPageRecord[];
   concepts: ConceptRecord[];
-  cards: CardRecord[];
-  reviews: ReviewRecord[];
-  goals: GoalRecord[];
 }
 
 export interface SearchChunk {
@@ -112,18 +56,6 @@ export interface SearchChunk {
   uri: string;
 }
 
-export interface LearnerConceptOverlay {
-  mastery: number;
-  confidence: number;
-  attempts: number;
-  dueCards: number;
-  lastStudiedAt?: string;
-  activeMisconceptions: Array<Pick<
-    MisconceptionRecord,
-    "id" | "text" | "occurrences" | "recordedAt"
-  >>;
-}
-
 export interface ConceptCapsule {
   key: string;
   title: string;
@@ -133,7 +65,6 @@ export interface ConceptCapsule {
   tags: string[];
   sourceIds: string[];
   match: "exact" | "alias" | "fuzzy" | "related";
-  learner?: LearnerConceptOverlay;
 }
 
 export interface CompactConceptCapsule {
@@ -142,14 +73,6 @@ export interface CompactConceptCapsule {
   summary: string;
   match: ConceptCapsule["match"];
   related?: string[];
-  learner?: Pick<
-    LearnerConceptOverlay,
-    "mastery" | "confidence" | "attempts"
-  > & {
-    dueCards?: number;
-    lastStudiedAt?: string;
-    activeMisconceptions?: LearnerConceptOverlay["activeMisconceptions"];
-  };
 }
 
 export interface EvidenceExcerpt {
@@ -165,23 +88,7 @@ export interface Dashboard {
     sources: number;
     wikiPages: number;
     concepts: number;
-    cards: number;
-    dueCards: number;
-    reviews: number;
-    activeGoals: number;
   };
-  mastery: {
-    average: number;
-    weakest: Array<Pick<ConceptRecord, "id" | "title" | "mastery" | "attempts">>;
-  };
-  recentReviews: Array<Pick<
-    ReviewRecord,
-    "cardId" | "grade" | "reviewedAt" | "elapsedMs"
-  >>;
-  activeGoals: Array<Pick<
-    GoalRecord,
-    "id" | "title" | "targetMastery" | "deadline"
-  >>;
 }
 
 export interface KnowledgeGraph {
@@ -191,15 +98,13 @@ export interface KnowledgeGraph {
   truncated: boolean;
   nodes: Array<{
     id: string;
-    type: "concept" | "source" | "goal";
+    type: "concept" | "source";
     label: string;
-    mastery?: number;
-    dueCards?: number;
   }>;
   edges: Array<{
     from: string;
     to: string;
-    type: "relates_to" | "supported_by" | "targets";
+    type: "relates_to" | "supported_by";
   }>;
   mermaid?: string;
 }

@@ -46,16 +46,14 @@ It also compares the former full-scan BM25 token work with the checksum-keyed in
 - same-context grounded-answer evidence deltas with safe full-packet fallback
 - strict source-only behavior and sources-first gap escalation
 - tamper, symlink, overlapping/repeated-evidence, prompt-injection, and contradictory-source defenses
-- grounded, solution-withholding practice briefs
-- single-payload MCP JSON, bounded answer/practice/search/math responses, compact bulk deltas, and no repeated per-call contracts
-- due-card scheduling, concurrent review persistence, and calibrated mastery updates
-- goal-aware adaptive study plans, structured misconception repair, and a visual knowledge/mastery graph
-- deterministic longitudinal mastery trajectories
-- ordered state-v3 legacy migrations, aliases, checksummed backups, restore round trips, and corrupted-backup reporting
+- single-payload MCP JSON, bounded answer/search responses, and no repeated per-call contracts
+- bounded concept/source knowledge graph neighborhoods
+- ordered state-v4 legacy migrations, aliases, checksummed backups, restore round trips, and corrupted-backup reporting
 - concurrent MCP mutations and cross-instance persistence
-- transcript-independent reconnect/resume behavior
-- known-answer numerical evaluation and equation solving in Python
-- rejection of code-execution expressions
-- real LaTeX PDF compilation and output validation
+- transcript-independent reconnect behavior
+
+The harness scores protocol and grounding *behavior*. It does not yet measure
+retrieval *quality* — there is no recall@k or MRR over labeled question/span
+pairs. Adding that is the next planned change.
 
 Edit `cases.json` to add golden retrieval cases or change the pass threshold. Add domain fixtures under `fixtures/`. Checks should remain deterministic; use a separate optional model-graded suite if answer-quality judgments are added later.

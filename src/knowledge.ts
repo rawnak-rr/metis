@@ -498,12 +498,7 @@ export class KnowledgeService {
           concept = {
             id: slug,
             title: page.title,
-            mastery: 0,
-            confidence: 0,
-            attempts: 0,
-            correct: 0,
             notes: [],
-            misconceptions: [],
             sourceIds,
           };
           next.concepts.push(concept);
@@ -1249,26 +1244,6 @@ export class KnowledgeService {
         ...(page?.tags ?? []),
       ]);
       const related = page?.links ?? [];
-      const activeMisconceptions = concept
-        ? concept.misconceptions
-          .filter((item) => !item.resolvedAt)
-          .sort((a, b) =>
-            b.occurrences - a.occurrences
-            || b.recordedAt.localeCompare(a.recordedAt))
-          .slice(0, CONTEXT_LIMITS.activeMisconceptions)
-          .map(({ id, text, occurrences, recordedAt }) => ({
-            id,
-            text: text.slice(0, 300),
-            occurrences,
-            recordedAt,
-          }))
-        : [];
-      const dueCards = concept
-        ? state.cards.filter((card) =>
-          card.conceptId === concept.id
-          && !card.suspended
-          && Date.parse(card.dueAt) <= now).length
-        : 0;
       const capsule: Omit<ConceptCapsule, "match"> = {
         key,
         title,
@@ -1281,20 +1256,6 @@ export class KnowledgeService {
         tags: (page?.tags ?? []).slice(0, 8)
           .map((tag) => tag.slice(0, 100)),
         sourceIds: sourceIds.slice(0, 8),
-        ...(concept
-          ? {
-              learner: {
-                mastery: concept.mastery,
-                confidence: concept.confidence,
-                attempts: concept.attempts,
-                dueCards,
-                ...(concept.lastStudiedAt
-                  ? { lastStudiedAt: concept.lastStudiedAt }
-                  : {}),
-                activeMisconceptions,
-              },
-            }
-          : {}),
       };
       const primaryKeys = new Set(primaryValues
         .map(normalizeLookupKey)
@@ -1471,29 +1432,12 @@ export class KnowledgeService {
 export function compactConceptCapsule(
   capsule: ConceptCapsule,
 ): CompactConceptCapsule {
-  const learner = capsule.learner
-    ? {
-        mastery: capsule.learner.mastery,
-        confidence: capsule.learner.confidence,
-        attempts: capsule.learner.attempts,
-        ...(capsule.learner.dueCards > 0
-          ? { dueCards: capsule.learner.dueCards }
-          : {}),
-        ...(capsule.learner.lastStudiedAt
-          ? { lastStudiedAt: capsule.learner.lastStudiedAt }
-          : {}),
-        ...(capsule.learner.activeMisconceptions.length > 0
-          ? { activeMisconceptions: capsule.learner.activeMisconceptions }
-          : {}),
-      }
-    : undefined;
   return {
     key: capsule.key,
     title: capsule.title,
     summary: capsule.summary,
     match: capsule.match,
     ...(capsule.related.length > 0 ? { related: capsule.related } : {}),
-    ...(learner ? { learner } : {}),
   };
 }
 
@@ -1613,12 +1557,7 @@ function reconcileKnowledgeRelationships(state: StudyState): {
       concept = {
         id: page.slug,
         title: page.title,
-        mastery: 0,
-        confidence: 0,
-        attempts: 0,
-        correct: 0,
         notes: [],
-        misconceptions: [],
         sourceIds: [...page.sourceIds],
       };
       state.concepts.push(concept);
@@ -1639,27 +1578,6 @@ function reconcileKnowledgeRelationships(state: StudyState): {
       concept.sourceIds = repaired;
     }
   }
-  const conceptIds = new Set(state.concepts.map((concept) => concept.id));
-  for (const card of state.cards) {
-    const repaired = unique(card.sourceIds.filter((id) => sourceIds.has(id)));
-    if (repaired.length !== card.sourceIds.length) {
-      learnerReferencesRepaired += card.sourceIds.length - repaired.length;
-      card.sourceIds = repaired;
-    }
-    if (card.conceptId && !conceptIds.has(card.conceptId)) {
-      delete card.conceptId;
-      learnerReferencesRepaired += 1;
-    }
-    card.tags = unique(card.tags);
-  }
-  for (const goal of state.goals) {
-    const repaired = unique(goal.conceptIds.filter((id) => conceptIds.has(id)));
-    if (repaired.length !== goal.conceptIds.length) {
-      learnerReferencesRepaired += goal.conceptIds.length - repaired.length;
-      goal.conceptIds = repaired;
-    }
-  }
-
   return {
     changed: before !== JSON.stringify(state),
     brokenLinksRemoved,

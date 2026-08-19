@@ -6,6 +6,5 @@ coverage/
 .metis/
 raw/
 wiki/
-exports/
 .eval-results/
 *.tgz
