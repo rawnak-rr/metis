@@ -211,8 +211,6 @@ npm run build
 
 The test suite covers the immutable source and wiki flow, grounded retrieval, citation validation, link linting, vault migration and repair, and an in-memory MCP client/server exchange.
 
-To evaluate an existing private vault without changing it, run `npm run eval:real-vault -- /absolute/path/to/vault`. See `evals/README.md`.
-
 ## Current boundaries
 
 - Retrieval is local BM25-style lexical search behind a direct keyed concept map and checksum-keyed incremental inverted index. Lexical matching is the kernel's weakest layer and the current focus of work. Derived per-source indexes are disposable and versioned; selected line spans are rehydrated only after the raw source checksum is verified. An optional embedding or hybrid reranker can be added without changing the vault format.
