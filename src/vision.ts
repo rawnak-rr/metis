@@ -1,6 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { MetisError } from "./errors.js";
 import type { ImageMediaType } from "./types.js";
+import { messageOf } from "./util.js";
 
 export type { ImageMediaType };
 
@@ -171,8 +172,4 @@ function visionRequestError(error: unknown, model: string): MetisError {
     `Image transcription with ${model} failed.`,
     { detail: messageOf(error), cause: error },
   );
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

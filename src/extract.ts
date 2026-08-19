@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { MetisError } from "./errors.js";
 import type { ExtractionMethod, SourceRecord } from "./types.js";
+import { messageOf } from "./util.js";
 import {
   MAX_VISION_IMAGE_BYTES,
   type ImageMediaType,
@@ -283,8 +284,4 @@ async function extractPdfText(absolutePath: string): Promise<string> {
 function hasUtf8Bom(bytes: Buffer): boolean {
   return bytes.byteLength >= 3
     && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

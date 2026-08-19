@@ -5,13 +5,15 @@ export const SEARCH_INDEX_FORMAT_VERSION = 1 as const;
 export const SEARCH_INDEX_DERIVATION_VERSION = [
   "text-parser-v2",
   "chunks-14-2-1400",
-  "tokenizer-v1",
+  "tokenizer-v2",
 ].join(":");
 
 const SOURCE_CHUNK_LINES = 14;
 const SOURCE_CHUNK_OVERLAP_LINES = 2;
 const SOURCE_CHUNK_CHARACTERS = 1_400;
 const MAX_PERSISTED_CHUNKS = 200_000;
+
+const SIBILANT_STEM = /(?:ss|x|z|ch|sh)$/;
 
 const STOP_WORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can",
@@ -109,11 +111,7 @@ export class IncrementalBm25Index {
   upsertSource(source: SourceRecord, text: string): SourceIndexBuildResult {
     const chunks = buildIndexedChunks(source, text);
     this.replaceSource(source, chunks);
-    return {
-      sourceId: source.id,
-      chunks: chunks.length,
-      lexicalTokens: chunks.reduce((total, chunk) => total + chunk.tokenCount, 0),
-    };
+    return indexBuildResult(source, chunks);
   }
 
   restoreSource(
@@ -139,11 +137,7 @@ export class IncrementalBm25Index {
       supportUnits: chunk.supportUnits,
     }));
     this.replaceSource(source, chunks);
-    return {
-      sourceId: source.id,
-      chunks: chunks.length,
-      lexicalTokens: chunks.reduce((total, chunk) => total + chunk.tokenCount, 0),
-    };
+    return indexBuildResult(source, chunks);
   }
 
   snapshot(sourceId: string): PersistedSourceSearchIndex | undefined {
@@ -309,12 +303,25 @@ export class IncrementalBm25Index {
   }
 }
 
-export function tokenize(text: string): string[] {
+/**
+ * Words as written, before any stemming. Each caller stems once with the
+ * variant its job needs; stacking two stemmers shifts the length guards of
+ * the second onto already-shortened tokens.
+ */
+export function tokenizeRaw(text: string): string[] {
   return (
     text.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}_'-]*/gu) ?? []
   )
-    .map((token) => token.replace(/^['-]+|['-]+$/g, ""))
-    .map(normalizeSearchToken)
+    .map((token) => token.replace(/^['-]+|['-]+$/g, ""));
+}
+
+export function isStopWord(token: string): boolean {
+  return STOP_WORDS.has(token);
+}
+
+export function tokenize(text: string): string[] {
+  return tokenizeRaw(text)
+    .map(stemSearch)
     .filter((token) => token.length > 1 && !STOP_WORDS.has(token));
 }
 
@@ -351,6 +358,17 @@ export function rehydrateChunkText(
     text = text.slice(0, SOURCE_CHUNK_CHARACTERS).trimEnd();
   }
   return text;
+}
+
+function indexBuildResult(
+  source: SourceRecord,
+  chunks: IndexedSearchChunk[],
+): SourceIndexBuildResult {
+  return {
+    sourceId: source.id,
+    chunks: chunks.length,
+    lexicalTokens: chunks.reduce((total, chunk) => total + chunk.tokenCount, 0),
+  };
 }
 
 function buildIndexedChunks(
@@ -486,7 +504,13 @@ function parsePersistedSourceIndex(
   };
 }
 
-function normalizeSearchToken(token: string): string {
+/**
+ * Conservative plural stemming for the index and for queries against it. Only
+ * unambiguous "-es" endings lose the "e" as well: a stem ending in a single
+ * "s" is left alone because "bases" (base) and "buses" (bus) are not
+ * distinguishable here, and over-stemming costs precision in every posting.
+ */
+export function stemSearch(token: string): string {
   if (token.length > 5 && token.endsWith("ies")) {
     return `${token.slice(0, -3)}y`;
   }
@@ -497,7 +521,10 @@ function normalizeSearchToken(token: string): string {
     && !token.endsWith("us")
     && !token.endsWith("is")
   ) {
-    return token.slice(0, -1);
+    const singular = token.slice(0, -1);
+    return singular.endsWith("e") && SIBILANT_STEM.test(singular.slice(0, -1))
+      ? singular.slice(0, -1)
+      : singular;
   }
   return token;
 }

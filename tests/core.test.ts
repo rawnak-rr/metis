@@ -418,6 +418,15 @@ describe("knowledge and grounding", () => {
       markdown: `# Mitochondria\n\nMitochondria produce ATP during cellular respiration. [${sourceId}#L1-L1]`,
       sourceIds: [sourceId],
     })).resolves.toEqual(expect.objectContaining({ slug: "mitochondria" }));
+
+    // The gate compares stems, so a claim may inflect its terms differently
+    // from the excerpt it cites.
+    await expect(knowledge.upsertWikiPage({
+      title: "Respiration",
+      summary: "Inflected restatement of the same cited evidence.",
+      markdown: `# Respiration\n\nA mitochondrion produces ATP by respiring cellularly. [${sourceId}#L1-L1]`,
+      sourceIds: [sourceId],
+    })).resolves.toEqual(expect.objectContaining({ slug: "respiration" }));
   });
 
   it.skipIf(process.platform === "win32")(

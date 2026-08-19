@@ -34,10 +34,13 @@ import {
 import {
   atomicWrite,
   clamp,
+  isNodeError,
+  messageOf,
   nowIso,
   safeExistingPath,
   safeWritePath,
   sha256,
+  stripFrontmatter,
   yamlString,
 } from "./util.js";
 
@@ -299,28 +302,23 @@ export class StudyStore {
   }
 
   async writeSourcePage(source: SourceRecord, preview: string): Promise<void> {
-    await this.initialize();
-    await this.enqueueWrite(async () => {
-      await atomicWrite(
-        await safeWritePath(
-          this.root,
-          path.posix.join("wiki", "sources", `${source.id}.md`),
-        ),
-        this.sourcePageText(source, preview),
-      );
-    });
+    await this.writeManagedPage(
+      path.posix.join("wiki", "sources", `${source.id}.md`),
+      this.sourcePageText(source, preview),
+    );
   }
 
   async writeWikiPage(page: WikiPageRecord, markdown: string): Promise<void> {
+    await this.writeManagedPage(
+      path.posix.join("wiki", "concepts", `${page.slug}.md`),
+      this.wikiPageText(page, markdown),
+    );
+  }
+
+  private async writeManagedPage(relativePath: string, text: string): Promise<void> {
     await this.initialize();
     await this.enqueueWrite(async () => {
-      await atomicWrite(
-        await safeWritePath(
-          this.root,
-          path.posix.join("wiki", "concepts", `${page.slug}.md`),
-        ),
-        this.wikiPageText(page, markdown),
-      );
+      await atomicWrite(await safeWritePath(this.root, relativePath), text);
     });
   }
 
@@ -352,7 +350,7 @@ export class StudyStore {
       );
       await atomicWrite(
         await safeWritePath(this.root, relativePath),
-        this.wikiPageText(page, stripWikiFrontmatter(markdown)),
+        this.wikiPageText(page, stripFrontmatter(markdown)),
       );
     }
   }
@@ -461,11 +459,11 @@ export class StudyStore {
           await this.restoreManagedFiles(backupRelativePath);
         } catch (restoreError) {
           throw new Error(
-            `Metis schema migration failed and automatic rollback also failed. Migration error: ${errorMessage(error)} Rollback error: ${errorMessage(restoreError)} Manual backup: ${backupRelativePath}`,
+            `Metis schema migration failed and automatic rollback also failed. Migration error: ${messageOf(error)} Rollback error: ${messageOf(restoreError)} Manual backup: ${backupRelativePath}`,
           );
         }
         throw new Error(
-          `Metis schema migration failed; managed files were automatically restored from '${backupRelativePath}'. ${errorMessage(error)}`,
+          `Metis schema migration failed; managed files were automatically restored from '${backupRelativePath}'. ${messageOf(error)}`,
         );
       }
       return {
@@ -566,7 +564,7 @@ export class StudyStore {
             return {
               relativePath,
               integrity: "invalid",
-              issue: errorMessage(error),
+              issue: messageOf(error),
             };
           }
         }));
@@ -936,48 +934,66 @@ export class StudyStore {
             });
           }
         } catch (rollbackError) {
-          rollbackErrors.push(errorMessage(rollbackError));
+          rollbackErrors.push(messageOf(rollbackError));
         }
       }
       if (rollbackErrors.length > 0) {
         throw new Error(
-          `Managed transaction failed and file rollback was incomplete. Original error: ${errorMessage(error)} Rollback errors: ${rollbackErrors.join(" | ")}`,
+          `Managed transaction failed and file rollback was incomplete. Original error: ${messageOf(error)} Rollback errors: ${rollbackErrors.join(" | ")}`,
         );
       }
       throw error;
     }
   }
 
-  private async readStateFile(): Promise<StudyState> {
-    const value = JSON.parse(await readFile(this.statePath, "utf8")) as unknown;
+  private async readVersionedFile<T>(
+    filePath: string,
+    label: "state" | "config",
+    expectedVersion: number,
+    parse: (value: unknown) => T,
+  ): Promise<T> {
+    const value = JSON.parse(await readFile(filePath, "utf8")) as unknown;
     const version = schemaVersionOf(value);
-    if (version !== CURRENT_STATE_SCHEMA_VERSION) {
+    if (version !== expectedVersion) {
       throw new Error(
-        `Vault state schema v${version} requires repair to v${CURRENT_STATE_SCHEMA_VERSION}. Run 'metis repair' or ask the connected LLM to call metis_repair.`,
+        `Vault ${label} schema v${version} requires repair to v${expectedVersion}. Run 'metis repair' or ask the connected LLM to call metis_repair.`,
       );
     }
-    return parseStudyState(value);
+    return parse(value);
   }
 
-  private async readConfigFile(): Promise<StudyConfig> {
-    const value = JSON.parse(await readFile(this.configPath, "utf8")) as unknown;
-    const version = schemaVersionOf(value);
-    if (version !== CURRENT_CONFIG_SCHEMA_VERSION) {
-      throw new Error(
-        `Vault config schema v${version} requires repair to v${CURRENT_CONFIG_SCHEMA_VERSION}. Run 'metis repair' or ask the connected LLM to call metis_repair.`,
-      );
-    }
-    return parseStudyConfig(value);
+  private async writeVersionedFile<T>(
+    filePath: string,
+    value: T,
+    parse: (value: unknown) => T,
+  ): Promise<void> {
+    await atomicWrite(filePath, `${JSON.stringify(parse(value), null, 2)}\n`);
   }
 
-  private async writeStateFile(state: StudyState): Promise<void> {
-    const validated = parseStudyState(state);
-    await atomicWrite(this.statePath, `${JSON.stringify(validated, null, 2)}\n`);
+  private readStateFile(): Promise<StudyState> {
+    return this.readVersionedFile(
+      this.statePath,
+      "state",
+      CURRENT_STATE_SCHEMA_VERSION,
+      parseStudyState,
+    );
   }
 
-  private async writeConfigFile(config: StudyConfig): Promise<void> {
-    const validated = parseStudyConfig(config);
-    await atomicWrite(this.configPath, `${JSON.stringify(validated, null, 2)}\n`);
+  private readConfigFile(): Promise<StudyConfig> {
+    return this.readVersionedFile(
+      this.configPath,
+      "config",
+      CURRENT_CONFIG_SCHEMA_VERSION,
+      parseStudyConfig,
+    );
+  }
+
+  private writeStateFile(state: StudyState): Promise<void> {
+    return this.writeVersionedFile(this.statePath, state, parseStudyState);
+  }
+
+  private writeConfigFile(config: StudyConfig): Promise<void> {
+    return this.writeVersionedFile(this.configPath, config, parseStudyConfig);
   }
 
   private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
@@ -1067,15 +1083,6 @@ export class StudyStore {
   }
 }
 
-function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error
-    && (error as NodeJS.ErrnoException).code === code;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -1131,10 +1138,6 @@ function renderMermaidGraph(
 
 function mermaidLabel(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll("\"", "'").replaceAll("\n", " ");
-}
-
-function stripWikiFrontmatter(markdown: string): string {
-  return markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
 }
 
 const WIKI_SCHEMA = `# Study Wiki Schema

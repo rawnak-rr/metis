@@ -13,18 +13,22 @@ import type {
 import { GENERATED_WIKI_FORMAT_VERSION, StudyStore } from "./store.js";
 import {
   atomicWrite,
+  messageOf,
   newId,
   nowIso,
   sanitizeFilename,
   sha256,
   slugify,
+  stripFrontmatter,
   unique,
 } from "./util.js";
 import {
   IncrementalBm25Index,
+  isStopWord,
   rehydrateChunkText,
   supportFingerprint,
   tokenize,
+  tokenizeRaw,
   type RankedIndexedChunk,
 } from "./retrieval.js";
 import { MetisError, errorPayload, type MetisErrorPayload } from "./errors.js";
@@ -224,13 +228,14 @@ export interface RetrievalDiagnostics {
   indexedChunksCurrent: number;
 }
 
-interface SearchSyncDiagnostics {
-  memoryIndexHits: number;
-  diskIndexHits: number;
-  sourcesIndexed: number;
-  chunksIndexed: number;
-  sourceLexicalTokensIndexed: number;
-}
+type SearchSyncDiagnostics = Pick<
+  RetrievalDiagnostics,
+  | "memoryIndexHits"
+  | "diskIndexHits"
+  | "sourcesIndexed"
+  | "chunksIndexed"
+  | "sourceLexicalTokensIndexed"
+>;
 
 const EMPTY_RETRIEVAL_DIAGNOSTICS: RetrievalDiagnostics = {
   searches: 0,
@@ -791,23 +796,12 @@ export class KnowledgeService {
       ? undefined
       : new Set(input.extensions.map((extension) =>
         (extension.startsWith(".") ? extension : `.${extension}`).toLowerCase()));
-    let rootAbsolute: string;
-    try {
-      rootAbsolute = await this.store.resolveExisting(root === "" ? "." : root);
-    } catch (error) {
-      if ((error as { code?: unknown }).code === "ENOENT") {
-        throw new MetisError(
-          "INGEST_SOURCE_NOT_FOUND",
-          `No directory exists at vault-relative path '${input.directory}'.`,
-          { cause: error },
-        );
-      }
-      throw new MetisError(
-        "INGEST_PATH_OUTSIDE_VAULT",
-        error instanceof Error ? error.message : String(error),
-        { cause: error },
-      );
-    }
+    const rootAbsolute = await resolveIngestSource(
+      this.store,
+      root === "" ? "." : root,
+      "directory",
+      input.directory,
+    );
     // Without this, a file passed as `directory` reaches readdir and surfaces a
     // raw ENOTDIR as UNEXPECTED_ERROR instead of a coded request failure.
     if (!(await stat(rootAbsolute)).isDirectory()) {
@@ -865,23 +859,7 @@ export class KnowledgeService {
         `Unsupported source type '${extension || "(none)"}'. Supported: ${SUPPORTED_SOURCE_EXTENSIONS.join(", ")}`,
       );
     }
-    let absolutePath: string;
-    try {
-      absolutePath = await this.store.resolveExisting(sourcePath);
-    } catch (error) {
-      if ((error as { code?: unknown }).code === "ENOENT") {
-        throw new MetisError(
-          "INGEST_SOURCE_NOT_FOUND",
-          `No file exists at vault-relative path '${sourcePath}'.`,
-          { cause: error },
-        );
-      }
-      throw new MetisError(
-        "INGEST_PATH_OUTSIDE_VAULT",
-        error instanceof Error ? error.message : String(error),
-        { cause: error },
-      );
-    }
+    const absolutePath = await resolveIngestSource(this.store, sourcePath, "file");
     const details = await stat(absolutePath);
     if (!details.isFile()) {
       throw new MetisError(
@@ -2112,9 +2090,29 @@ async function resolveIngestTarget(
   } catch (error) {
     throw new MetisError(
       "INGEST_PATH_OUTSIDE_VAULT",
-      error instanceof Error ? error.message : String(error),
+      messageOf(error),
       { cause: error },
     );
+  }
+}
+
+async function resolveIngestSource(
+  store: StudyStore,
+  relativePath: string,
+  kind: "file" | "directory",
+  reportedPath = relativePath,
+): Promise<string> {
+  try {
+    return await store.resolveExisting(relativePath);
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") {
+      throw new MetisError(
+        "INGEST_SOURCE_NOT_FOUND",
+        `No ${kind} exists at vault-relative path '${reportedPath}'.`,
+        { cause: error },
+      );
+    }
+    throw new MetisError("INGEST_PATH_OUTSIDE_VAULT", messageOf(error), { cause: error });
   }
 }
 
@@ -2188,10 +2186,6 @@ function parseWikiCitations(markdown: string): WikiCitation[] {
   }));
 }
 
-function stripFrontmatter(markdown: string): string {
-  return markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
-}
-
 function wikiClaimBlocks(markdown: string): string[] {
   return stripFrontmatter(markdown)
     .replace(/\r\n/g, "\n")
@@ -2221,21 +2215,38 @@ function stripCitationAndMarkdownSyntax(markdown: string): string {
     .trim();
 }
 
-function lexicalSupportTokens(text: string): string[] {
-  return unique(tokenize(text)
-    .map(normalizeSupportToken)
-    .filter((token) => token.length > 1 && !GENERIC_SUPPORT_WORDS.has(token)));
+export function lexicalSupportTokens(text: string): string[] {
+  return unique(tokenizeRaw(text)
+    .filter((word) => !isStopWord(word) && !GENERIC_SUPPORT_WORDS.has(word))
+    .map(stemSupport)
+    .filter((token) => token.length > 1));
 }
 
-function normalizeSupportToken(token: string): string {
-  if (token.length > 7 && token.endsWith("ingly")) return token.slice(0, -5);
-  if (token.length > 6 && token.endsWith("edly")) return token.slice(0, -4);
-  if (token.length > 6 && token.endsWith("ing")) return token.slice(0, -3);
-  if (token.length > 5 && token.endsWith("ed")) return token.slice(0, -2);
-  if (token.length > 5 && token.endsWith("ly")) return token.slice(0, -2);
-  if (token.length > 5 && token.endsWith("es")) return token.slice(0, -2);
-  if (token.length > 4 && token.endsWith("s")) return token.slice(0, -1);
-  return token;
+/**
+ * Aggressive stemming for the citation-support gate, which asks whether a
+ * claim and its cited excerpt talk about the same things. Inflected forms
+ * should collide here even at some cost in precision, so plurals are removed
+ * before verb endings ("ratings" -> "rating" -> "rat") and a trailing silent
+ * "e" goes last so "hedge", "hedged", "hedges", and "hedging" all agree.
+ */
+export function stemSupport(token: string): string {
+  let stem = token;
+  if (stem.length > 4 && stem.endsWith("es")) stem = stem.slice(0, -2);
+  else if (
+    stem.length > 3
+    && stem.endsWith("s")
+    // A doubled or vowel-preceded "s" usually belongs to the stem itself
+    // ("class", "increas"); stripping it would break idempotence.
+    && !/(?:ss|[aeiou]s)$/.test(stem)
+  ) {
+    stem = stem.slice(0, -1);
+  }
+  if (stem.length > 7 && stem.endsWith("ingly")) stem = stem.slice(0, -5);
+  else if (stem.length > 6 && stem.endsWith("edly")) stem = stem.slice(0, -4);
+  else if (stem.length > 5 && stem.endsWith("ing")) stem = stem.slice(0, -3);
+  else if (stem.length > 4 && stem.endsWith("ed")) stem = stem.slice(0, -2);
+  else if (stem.length > 4 && stem.endsWith("ly")) stem = stem.slice(0, -2);
+  return stem.length > 3 && stem.endsWith("e") ? stem.slice(0, -1) : stem;
 }
 
 function reconcileKnowledgeRelationships(state: StudyState): {

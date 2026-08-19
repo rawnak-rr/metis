@@ -11,6 +11,7 @@ import {
 import { errorPayload } from "./errors.js";
 import { SUPPORTED_SOURCE_EXTENSIONS } from "./extract.js";
 import { GroundingService } from "./grounding.js";
+import { GROUNDING_POLICY } from "./policy.js";
 import { RepairService } from "./repair.js";
 import { StudyStore } from "./store.js";
 import type { GroundingMode } from "./types.js";
@@ -118,11 +119,7 @@ function registerResources(server: McpServer, store: StudyStore, knowledge: Know
       mimeType: "application/json",
     },
     async (uri, variables) => {
-      const slug = variableString(variables.slug);
-      const state = await store.readState();
-      if (!state.wikiPages.some((page) => page.slug === slug)) {
-        throw new Error(`Unknown wiki page: ${slug}`);
-      }
+      const slug = await requireWikiPageSlug(store, variables.slug);
       const capsule = (await knowledge.lookupConcepts(slug, 1))[0];
       if (!capsule || capsule.key !== slug) {
         throw new Error(`Concept capsule is unavailable: ${slug}`);
@@ -148,11 +145,7 @@ function registerResources(server: McpServer, store: StudyStore, knowledge: Know
       mimeType: "text/markdown",
     },
     async (uri, variables) => {
-      const slug = variableString(variables.slug);
-      const state = await store.readState();
-      if (!state.wikiPages.some((page) => page.slug === slug)) {
-        throw new Error(`Unknown wiki page: ${slug}`);
-      }
+      const slug = await requireWikiPageSlug(store, variables.slug);
       return {
         contents: [{
           uri: uri.href,
@@ -226,7 +219,7 @@ function registerPrompts(server: McpServer): void {
             `First call prepare_grounded_answer with grounding mode ${grounding ?? "sources_first"}.`,
             "Explain the mental model, connect it to prerequisites, and show one concrete example.",
             "Cite exact evidence tokens for every factual claim and label any necessary external additions.",
-            "Leave unsupported facets unfilled rather than inferring past the evidence.",
+            GROUNDING_POLICY.unsupportedFacets,
           ].join("\n"),
         },
       }],
@@ -540,6 +533,18 @@ async function codedResult(operation: () => Promise<unknown>) {
       }],
     };
   }
+}
+
+async function requireWikiPageSlug(
+  store: StudyStore,
+  value: string | string[] | undefined,
+): Promise<string> {
+  const slug = variableString(value);
+  const state = await store.readState();
+  if (!state.wikiPages.some((page) => page.slug === slug)) {
+    throw new Error(`Unknown wiki page: ${slug}`);
+  }
+  return slug;
 }
 
 function variableString(value: string | string[] | undefined): string {

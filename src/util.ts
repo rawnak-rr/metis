@@ -34,6 +34,8 @@ export function sanitizeFilename(value: string, fallback: string): string {
   return cleaned || fallback;
 }
 
+const VAULT_ESCAPE_MESSAGE = "Resolved path is outside the configured study vault.";
+
 export function safePath(root: string, relativePath: string): string {
   if (path.isAbsolute(relativePath)) {
     throw new Error("Expected a path relative to the configured study vault.");
@@ -53,7 +55,7 @@ export async function safeExistingPath(root: string, relativePath: string): Prom
     realpath(resolved),
   ]);
   if (!isWithin(canonicalRoot, canonicalPath)) {
-    throw new Error("Resolved path is outside the configured study vault.");
+    throw new Error(VAULT_ESCAPE_MESSAGE);
   }
   return canonicalPath;
 }
@@ -65,7 +67,7 @@ export async function safeWritePath(root: string, relativePath: string): Promise
     realpath(path.dirname(resolved)),
   ]);
   if (!isWithin(canonicalRoot, canonicalParent)) {
-    throw new Error("Resolved path is outside the configured study vault.");
+    throw new Error(VAULT_ESCAPE_MESSAGE);
   }
   return path.join(canonicalParent, path.basename(resolved));
 }
@@ -89,8 +91,17 @@ export function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-export function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
+export function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error
+    && (error as NodeJS.ErrnoException).code === code;
+}
+
+export function stripFrontmatter(markdown: string): string {
+  return markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
 }
 
 function isWithin(root: string, candidate: string): boolean {

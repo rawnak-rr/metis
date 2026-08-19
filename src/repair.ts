@@ -15,7 +15,7 @@ import {
   type SkillSyncResult,
 } from "./skills.js";
 import { StudyStore, type VaultUpdateResult } from "./store.js";
-import { atomicWrite, nowIso, sha256 } from "./util.js";
+import { atomicWrite, messageOf, nowIso, sha256 } from "./util.js";
 import { METIS_VERSION } from "./version.js";
 
 export interface VaultRepairResult {
@@ -104,11 +104,11 @@ export class RepairService {
         await this.store.restoreVaultBackup(update.backupRelativePath);
       } catch (restoreError) {
         throw new Error(
-          `Metis repair failed and rollback also failed. Repair error: ${errorMessage(error)} Rollback error: ${errorMessage(restoreError)} Manual backup: ${update.backupRelativePath}`,
+          `Metis repair failed and rollback also failed. Repair error: ${messageOf(error)} Rollback error: ${messageOf(restoreError)} Manual backup: ${update.backupRelativePath}`,
         );
       }
       throw new Error(
-        `Metis repair failed; managed state and wiki files were restored from '${update.backupRelativePath}'. ${errorMessage(error)}`,
+        `Metis repair failed; managed state and wiki files were restored from '${update.backupRelativePath}'. ${messageOf(error)}`,
       );
     }
   }
@@ -189,8 +189,4 @@ function migrationSummary(
     required: preview.updateRequired,
     actions: update.actions,
   };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
