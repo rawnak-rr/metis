@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible Metis defect without including private study data.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not attach a personal vault, source document, credential, or `.metis` backup.
+  - type: input
+    id: version
+    attributes:
+      label: Metis version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Vault persistence or migration
+        - Source ingestion or grounding
+        - Wiki compilation
+        - Adaptive learning or review
+        - Mathematical verification or PDF
+        - MCP protocol or packaging
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic content and list exact tool calls or commands.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Relevant test or evaluation output
+

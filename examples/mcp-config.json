@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "metis": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/metis/dist/src/index.js"
+      ],
+      "env": {
+        "METIS_VAULT_PATH": "/absolute/path/to/Obsidian Vault"
+      }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "name": "metis",
+  "version": "0.1.0",
+  "description": "A local-first MCP study system for grounded learning, persistent wikis, practice, mastery tracking, and verified mathematical PDFs.",
+  "type": "module",
+  "bin": {
+    "metis": "dist/src/index.js"
+  },
+  "files": [
+    "dist/src",
+    "python",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "docs/architecture.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/src/index.js",
+    "repair": "node dist/src/index.js repair",
+    "dev": "tsx src/index.ts",
+    "inspector": "npx @modelcontextprotocol/inspector tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "eval": "node --import tsx evals/run.ts",
+    "eval:ci": "node --import tsx evals/run.ts --ci",
+    "eval:real-vault": "node --import tsx evals/real-vault.ts",
+    "check": "npm run typecheck && npm test && npm run eval:ci",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "study",
+    "obsidian",
+    "spaced-repetition",
+    "wiki",
+    "latex"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
