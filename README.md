@@ -206,13 +206,12 @@ For long sessions, dashboards expose bounded summaries plus totals, and graph an
 ```sh
 npm run typecheck
 npm test
-npm run eval
 npm run build
 ```
 
 The test suite covers the immutable source and wiki flow, grounded retrieval, citation validation, link linting, vault migration and repair, and an in-memory MCP client/server exchange.
 
-The scored MCP evaluation harness runs separately with `npm run eval`. It talks to the server only through MCP, applies a growing weighted rubric with an 85% threshold, requires all critical safety checks, and writes JSON and Markdown reports to `.eval-results/`. See `evals/README.md` for coverage and extension instructions.
+To evaluate an existing private vault without changing it, run `npm run eval:real-vault -- /absolute/path/to/vault`. See `evals/README.md`.
 
 ## Current boundaries
 
