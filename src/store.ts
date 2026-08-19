@@ -1126,7 +1126,6 @@ function renderMermaidGraph(
     ...mermaidEdges,
     "  classDef concept fill:#e8eefc,stroke:#2457c5,color:#17202a;",
     "  classDef source fill:#f2f4f4,stroke:#7b8a8b,color:#17202a;",
-    "  classDef goal fill:#fff3cd,stroke:#c58a00,color:#17202a;",
   ].join("\n");
 }
 
@@ -1148,7 +1147,7 @@ This vault separates evidence from synthesis so its knowledge stays inspectable.
 2. \`wiki/sources/\` contains provenance pages generated from raw sources.
 3. \`wiki/concepts/\` contains compiled, cross-linked explanations maintained through the MCP.
 4. \`wiki/index.md\` is the content map. \`wiki/log.md\` is the append-only operation timeline.
-5. \`.metis/\` contains portable machine state for reviews, mastery, and goals.
+5. \`.metis/\` contains portable machine state: the source, wiki page, and concept records, the derived-text and search caches, and managed backups.
 
 ## Concept page contract
 
@@ -1161,17 +1160,10 @@ This vault separates evidence from synthesis so its knowledge stays inspectable.
 
 ## Answering
 
-- Use the compiled wiki for navigation and synthesis, but use checksum-verified raw sources as authoritative answer and practice evidence.
+- Use the compiled wiki for navigation and synthesis, but use checksum-verified raw sources as the authoritative evidence behind every answer.
 - Default to sources-first grounding. Outside knowledge is added only when the vault is insufficient and is clearly labelled.
 - Never invent citations.
-- Verify all numerical mathematics through the Python verifier before presenting results.
-
-## Learning loop
-
-- Retrieval precedes rereading.
-- Practice mixes recall, explanation, application, comparison, debugging, and transfer.
-- Reviews and scored attempts update calibrated mastery; structured misconceptions retain recurrence and resolution as adaptive study signals.
-- Session plans prioritize due reviews, active goals, and low-mastery concepts.
+- Quote numerical results from the cited excerpt. A figure the sources do not contain is derived work, and is labelled as such alongside the evidence it rests on.
 
 ## Maintenance
 

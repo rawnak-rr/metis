@@ -68,7 +68,7 @@ function registerResources(server: McpServer, store: StudyStore, knowledge: Know
     "study://dashboard",
     {
       title: "Study dashboard",
-      description: "Current source, review, goal, and mastery summary.",
+      description: "Current source, wiki page, and concept counts for the vault.",
       mimeType: "application/json",
     },
     async () => ({

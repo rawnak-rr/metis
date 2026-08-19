@@ -425,20 +425,25 @@ describe("batch ingestion", () => {
     expect(result.duplicates).toBe(1);
     expect(result.failed).toBe(1);
     expect(result.skipped).toBe(1);
-    expect(Object.fromEntries(result.items.map((item) => [item.sourcePath, item.status])))
-      .toEqual({
-        "inbox/broken.txt": "failed",
-        "inbox/chain-rule.md": "ingested",
-        "inbox/copy-of-chain-rule.md": "duplicate",
-        "inbox/learning-rate.txt": "ingested",
-      });
+    const status = Object.fromEntries(result.items.map((item) =>
+      [item.sourcePath, item.status]));
+    expect(status["inbox/broken.txt"]).toBe("failed");
+    expect(status["inbox/learning-rate.txt"]).toBe("ingested");
+    // Whichever of the two identical files stages first claims the record, so
+    // the pair is asserted as a pair rather than by name.
+    expect([status["inbox/chain-rule.md"], status["inbox/copy-of-chain-rule.md"]].sort())
+      .toEqual(["duplicate", "ingested"]);
     const failure = result.items.find((item) => item.status === "failed");
     expect(failure?.error?.code).toBe("EXTRACT_NOT_UTF8");
 
     const state = await store.readState();
     expect(state.sources).toHaveLength(2);
-    expect(state.sources.map((source) => source.title).sort())
-      .toEqual(["chain rule", "learning rate"]);
+    // The title comes from the filename, so the race winner decides which of
+    // the two identical files is named. Both pairings are exact and valid.
+    expect([
+      ["chain rule", "learning rate"],
+      ["copy of chain rule", "learning rate"],
+    ]).toContainEqual(state.sources.map((source) => source.title).sort());
     // One shared commit means one log entry, not one per file.
     const log = await store.readText("wiki/log.md");
     expect(log.match(/\] ingest_batch \|/g) ?? []).toHaveLength(1);
