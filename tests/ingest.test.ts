@@ -530,6 +530,14 @@ describe("batch ingestion", () => {
       .toBe("INGEST_DIRECTORY_MANAGED");
     expect(await ingestCode(() => knowledge.ingestMany({ directory: "wiki/sources" })))
       .toBe("INGEST_DIRECTORY_MANAGED");
+    expect(await ingestCode(() => knowledge.ingestMany({
+      sourcePaths: ["wiki/concepts/chain-rule.md"],
+    }))).toBe("INGEST_SOURCE_MANAGED");
+    expect(await ingestCode(() => knowledge.ingestMany({
+      sourcePaths: ["good.md", "raw/src-1-notes.md"],
+    }))).toBe("INGEST_SOURCE_MANAGED");
+    expect(await ingestCode(() => knowledge.ingestMany({ directory: "empty/notes.key" })))
+      .toBe("INGEST_SOURCE_NOT_A_DIRECTORY");
     expect(await ingestCode(() => knowledge.ingestMany({ directory: ".." })))
       .toBe("INGEST_PATH_OUTSIDE_VAULT");
     expect(await ingestCode(() => knowledge.ingestMany({ directory: "/etc" })))
@@ -560,6 +568,32 @@ describe("batch ingestion", () => {
       });
     // A failed item leaves no read-only orphan behind.
     expect(await readdir(path.join(root, "raw"))).toHaveLength(1);
+  });
+
+  it("keeps a committed batch when indexing one item afterwards fails", async () => {
+    const { root, store, knowledge } = await fixture();
+    await writeFile(path.join(root, "seed.md"), "Seed evidence for the batch.\n", "utf8");
+    await knowledge.ingest({ title: "Seed", sourcePath: "seed.md" });
+    // Corrupt the committed raw copy, so re-reading the duplicate's text after
+    // the commit fails integrity verification.
+    const [rawName] = await readdir(path.join(root, "raw"));
+    const rawCopy = path.join(root, "raw", rawName ?? "");
+    await chmod(rawCopy, 0o600);
+    await writeFile(rawCopy, "Tampered evidence.\n", "utf8");
+    await writeFile(path.join(root, "fresh.md"), "Fresh evidence for the batch.\n", "utf8");
+    // A cold service, so the duplicate's text comes off disk rather than cache.
+    const cold = new KnowledgeService(store);
+
+    const result = await cold.ingestMany({ sourcePaths: ["seed.md", "fresh.md"] });
+
+    expect(result.ingested).toBe(1);
+    expect(result.duplicates).toBe(1);
+    expect(result.items.find((item) => item.status === "duplicate")?.error?.code)
+      .toBe("SOURCE_INTEGRITY_FAILED");
+    // The commit stands: the failure is reported on its item, not as a failed call.
+    const state = await store.readState();
+    expect(state.sources).toHaveLength(2);
+    expect(state.sources.map((source) => source.title)).toContain("fresh");
   });
 
   it("leaves no staged copy behind when the shared commit fails", async () => {

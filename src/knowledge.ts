@@ -503,6 +503,17 @@ export class KnowledgeService {
     const scan = input.directory === undefined
       ? { paths: normalizeBatchPaths(input.sourcePaths ?? []), skipped: 0 }
       : await this.scanIngestDirectory(input);
+    // A directory scan skips Metis-managed directories; an explicit work list
+    // has to be held to the same rule, or a generated wiki page can be handed
+    // back in as fresh evidence.
+    const managed = scan.paths.filter(isManagedVaultPath);
+    if (managed.length > 0) {
+      throw new MetisError(
+        "INGEST_SOURCE_MANAGED",
+        `${managed.length} path(s) are inside a Metis-managed directory (${[...MANAGED_VAULT_DIRECTORIES].join(", ")}), which holds immutable raw copies and generated pages. Ingesting them would re-ingest Metis's own output as fresh evidence.`,
+        { detail: `First: '${managed[0]}'` },
+      );
+    }
     if (scan.paths.length === 0) {
       throw new MetisError(
         "INGEST_BATCH_EMPTY",
@@ -619,16 +630,24 @@ export class KnowledgeService {
       throw ingestionFailure(error);
     }
 
-    for (const entry of prepared) {
-      await this.indexIngestedSource(entry.source, entry.text);
-    }
-    // A duplicate still has to be searchable, exactly as a single duplicate
-    // ingestion is, and its text is already verified on disk.
+    // The batch is committed from here on, so nothing below may throw: failing
+    // the call would report total failure for sources already written to state,
+    // the wiki, and the log, and the caller would re-run the batch only to be
+    // told everything is a duplicate. The index is rebuilt from state on load,
+    // so a failure is recorded on its item and the result still stands. A
+    // duplicate is indexed too, exactly as a single duplicate ingestion is.
+    const preparedText = new Map(
+      prepared.map((entry) => [entry.source.id, entry.text]),
+    );
     for (const item of items) {
-      if (item.status !== "duplicate" || !item.source) continue;
-      if (this.retrievalIndex.hasSource(item.source)) continue;
-      const text = await this.readSourceText(item.source);
-      await this.indexIngestedSource(item.source, text);
+      if (!item.source || this.retrievalIndex.hasSource(item.source)) continue;
+      try {
+        const text = preparedText.get(item.source.id)
+          ?? await this.readSourceText(item.source);
+        await this.indexIngestedSource(item.source, text);
+      } catch (error) {
+        item.error = errorPayload(error);
+      }
     }
 
     const concepts = unique(prepared.flatMap((entry) =>
@@ -772,8 +791,9 @@ export class KnowledgeService {
       ? undefined
       : new Set(input.extensions.map((extension) =>
         (extension.startsWith(".") ? extension : `.${extension}`).toLowerCase()));
+    let rootAbsolute: string;
     try {
-      await this.store.resolveExisting(root === "" ? "." : root);
+      rootAbsolute = await this.store.resolveExisting(root === "" ? "." : root);
     } catch (error) {
       if ((error as { code?: unknown }).code === "ENOENT") {
         throw new MetisError(
@@ -786,6 +806,14 @@ export class KnowledgeService {
         "INGEST_PATH_OUTSIDE_VAULT",
         error instanceof Error ? error.message : String(error),
         { cause: error },
+      );
+    }
+    // Without this, a file passed as `directory` reaches readdir and surfaces a
+    // raw ENOTDIR as UNEXPECTED_ERROR instead of a coded request failure.
+    if (!(await stat(rootAbsolute)).isDirectory()) {
+      throw new MetisError(
+        "INGEST_SOURCE_NOT_A_DIRECTORY",
+        `Vault-relative path '${input.directory}' is a file, not a directory. Pass it as sourcePaths to ingest it.`,
       );
     }
 

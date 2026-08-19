@@ -346,7 +346,7 @@ function registerTools(
   server.registerTool(
     "ingest_sources",
     {
-      description: "Store many vault files as immutable searchable evidence in one call: either an explicit 'sourcePaths' list or a 'directory' to scan. Titles come from filenames. Extraction is per file, so one unreadable file is reported in 'items' with its own 'error.code' while the rest succeed; the state commit is shared, so the batch costs one write. Metis-managed 'raw/', 'wiki/', and '.metis/' are never scanned.",
+      description: "Store many vault files as immutable searchable evidence in one call: either an explicit 'sourcePaths' list or a 'directory' to scan. Titles come from filenames. Extraction is per file, so one unreadable file is reported in 'items' with its own 'error.code' while the rest succeed; the state commit is shared, so the batch costs one write. Metis-managed 'raw/', 'wiki/', and '.metis/' hold Metis's own output and are never scanned, and are rejected in 'sourcePaths'.",
       inputSchema: {
         sourcePaths: z.array(z.string().min(1)).min(1).max(200).optional()
           .describe("Vault-relative files; mutually exclusive with directory"),
