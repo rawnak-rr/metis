@@ -9,7 +9,6 @@
   "files": [
     "dist/src",
     "README.md",
-    "CHANGELOG.md",
     "SECURITY.md",
     "docs/architecture.md",
     "LICENSE"

@@ -408,6 +408,177 @@ describe("image ingestion", () => {
   });
 });
 
+describe("batch ingestion", () => {
+  it("classifies every file in a directory and commits once", async () => {
+    const { root, store, knowledge } = await fixture();
+    await mkdir(path.join(root, "inbox"), { recursive: true });
+    await writeFile(path.join(root, "inbox", "chain-rule.md"), "The chain rule differentiates a composition.\n", "utf8");
+    await writeFile(path.join(root, "inbox", "learning-rate.txt"), "The learning rate sets the step size.\n", "utf8");
+    await writeFile(path.join(root, "inbox", "copy-of-chain-rule.md"), "The chain rule differentiates a composition.\n", "utf8");
+    await writeFile(path.join(root, "inbox", "slides.key"), "unsupported", "utf8");
+    await writeFile(path.join(root, "inbox", "broken.txt"), Buffer.from([0x48, 0x69, 0xff, 0xfe]));
+
+    const result = await knowledge.ingestMany({ directory: "inbox" });
+
+    expect(result.requested).toBe(4);
+    expect(result.ingested).toBe(2);
+    expect(result.duplicates).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(result.skipped).toBe(1);
+    expect(Object.fromEntries(result.items.map((item) => [item.sourcePath, item.status])))
+      .toEqual({
+        "inbox/broken.txt": "failed",
+        "inbox/chain-rule.md": "ingested",
+        "inbox/copy-of-chain-rule.md": "duplicate",
+        "inbox/learning-rate.txt": "ingested",
+      });
+    const failure = result.items.find((item) => item.status === "failed");
+    expect(failure?.error?.code).toBe("EXTRACT_NOT_UTF8");
+
+    const state = await store.readState();
+    expect(state.sources).toHaveLength(2);
+    expect(state.sources.map((source) => source.title).sort())
+      .toEqual(["chain rule", "learning rate"]);
+    // One shared commit means one log entry, not one per file.
+    const log = await store.readText("wiki/log.md");
+    expect(log.match(/\] ingest_batch \|/g) ?? []).toHaveLength(1);
+    expect(log.match(/\] ingest \|/g)).toBeNull();
+  });
+
+  it("resolves a byte-identical file in the same batch to the first record", async () => {
+    const { root, store, knowledge } = await fixture();
+    await mkdir(path.join(root, "dupes"), { recursive: true });
+    await writeFile(path.join(root, "dupes", "a.md"), "Identical evidence.\n", "utf8");
+    await writeFile(path.join(root, "dupes", "b.md"), "Identical evidence.\n", "utf8");
+
+    const result = await knowledge.ingestMany({ directory: "dupes" });
+
+    expect(result.ingested).toBe(1);
+    expect(result.duplicates).toBe(1);
+    const ingested = result.items.find((item) => item.status === "ingested");
+    const duplicate = result.items.find((item) => item.status === "duplicate");
+    expect(duplicate?.source?.id).toBe(ingested?.source?.id);
+    expect((await store.readState()).sources).toHaveLength(1);
+    const raw = await readdir(path.join(root, "raw"));
+    expect(raw).toHaveLength(1);
+  });
+
+  it("never ingests Metis's own generated output when scanning the vault root", async () => {
+    const { root, knowledge } = await fixture();
+    await knowledge.ingest({ title: "Seed", content: "Seed evidence for the wiki.\n" });
+    await writeFile(path.join(root, "fresh.md"), "Fresh evidence at the vault root.\n", "utf8");
+
+    const result = await knowledge.ingestMany({ directory: ".", recursive: true });
+
+    expect(result.items.map((item) => item.sourcePath)).toEqual(["fresh.md"]);
+    expect(result.items.every((item) => !item.sourcePath.startsWith("raw/"))).toBe(true);
+    expect(result.items.every((item) => !item.sourcePath.startsWith("wiki/"))).toBe(true);
+  });
+
+  it("scans subdirectories only when asked and honours an extension filter", async () => {
+    const { root, knowledge } = await fixture();
+    await mkdir(path.join(root, "deep", "nested"), { recursive: true });
+    await writeFile(path.join(root, "deep", "top.md"), "Top level evidence.\n", "utf8");
+    await writeFile(path.join(root, "deep", "notes.txt"), "Plain text evidence.\n", "utf8");
+    await writeFile(path.join(root, "deep", "nested", "inner.md"), "Nested evidence.\n", "utf8");
+
+    const shallow = await knowledge.ingestMany({ directory: "deep", extensions: ["md"] });
+    expect(shallow.items.map((item) => item.sourcePath)).toEqual(["deep/top.md"]);
+
+    const deep = await knowledge.ingestMany({ directory: "deep", recursive: true });
+    expect(deep.items.map((item) => item.sourcePath).sort())
+      .toEqual(["deep/nested/inner.md", "deep/notes.txt", "deep/top.md"]);
+    // The already-ingested file resolves as a duplicate rather than a second record.
+    expect(deep.items.find((item) => item.sourcePath === "deep/top.md")?.status)
+      .toBe("duplicate");
+  });
+
+  it("makes every batched source immediately searchable and tagged", async () => {
+    const { root, store, knowledge } = await fixture();
+    await mkdir(path.join(root, "corpus"), { recursive: true });
+    await writeFile(path.join(root, "corpus", "gradient-descent.md"), "Gradient descent follows the negative gradient.\n", "utf8");
+    await writeFile(path.join(root, "corpus", "bayes.md"), "Bayes theorem updates a prior into a posterior.\n", "utf8");
+
+    const result = await knowledge.ingestMany({ directory: "corpus", tags: ["batch"] });
+    const bayes = result.items.find((item) => item.sourcePath.endsWith("bayes.md"));
+
+    expect(await knowledge.search("posterior prior"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ documentId: bayes?.source?.id }),
+      ]));
+    const state = await store.readState();
+    expect(state.sources).toHaveLength(2);
+    expect(state.sources.every((source) => source.tags.includes("batch"))).toBe(true);
+  });
+
+  it("rejects malformed and oversized batch requests with distinguishable codes", async () => {
+    const { root, knowledge } = await fixture();
+    await mkdir(path.join(root, "empty"), { recursive: true });
+    await writeFile(path.join(root, "empty", "notes.key"), "unsupported", "utf8");
+
+    expect(await ingestCode(() => knowledge.ingestMany({})))
+      .toBe("INGEST_INPUT_AMBIGUOUS");
+    expect(await ingestCode(() => knowledge.ingestMany({
+      sourcePaths: ["a.md"],
+      directory: "empty",
+    }))).toBe("INGEST_INPUT_AMBIGUOUS");
+    expect(await ingestCode(() => knowledge.ingestMany({ directory: "empty" })))
+      .toBe("INGEST_BATCH_EMPTY");
+    expect(await ingestCode(() => knowledge.ingestMany({ directory: "absent" })))
+      .toBe("INGEST_SOURCE_NOT_FOUND");
+    expect(await ingestCode(() => knowledge.ingestMany({ directory: "raw" })))
+      .toBe("INGEST_DIRECTORY_MANAGED");
+    expect(await ingestCode(() => knowledge.ingestMany({ directory: "wiki/sources" })))
+      .toBe("INGEST_DIRECTORY_MANAGED");
+    expect(await ingestCode(() => knowledge.ingestMany({ directory: ".." })))
+      .toBe("INGEST_PATH_OUTSIDE_VAULT");
+    expect(await ingestCode(() => knowledge.ingestMany({ directory: "/etc" })))
+      .toBe("INGEST_PATH_OUTSIDE_VAULT");
+    expect(await ingestCode(() => knowledge.ingestMany({
+      sourcePaths: Array.from({ length: 201 }, (_, index) => `note-${index}.md`),
+    }))).toBe("INGEST_BATCH_TOO_LARGE");
+  });
+
+  it("reports a per-path failure without disturbing the rest of the list", async () => {
+    const { root, knowledge } = await fixture();
+    await writeFile(path.join(root, "good.md"), "Good evidence.\n", "utf8");
+    await writeFile(path.join(root, "report.docx"), "unsupported", "utf8");
+
+    const result = await knowledge.ingestMany({
+      sourcePaths: ["good.md", "report.docx", "missing.md", "good.md"],
+    });
+
+    expect(result.requested).toBe(3);
+    expect(result.ingested).toBe(1);
+    expect(result.failed).toBe(2);
+    expect(Object.fromEntries(result.items.map((item) =>
+      [item.sourcePath, item.error?.code ?? item.status])))
+      .toEqual({
+        "good.md": "ingested",
+        "report.docx": "INGEST_UNSUPPORTED_TYPE",
+        "missing.md": "INGEST_SOURCE_NOT_FOUND",
+      });
+    // A failed item leaves no read-only orphan behind.
+    expect(await readdir(path.join(root, "raw"))).toHaveLength(1);
+  });
+
+  it("leaves no staged copy behind when the shared commit fails", async () => {
+    const { root, store, knowledge } = await fixture();
+    await mkdir(path.join(root, "batch"), { recursive: true });
+    await writeFile(path.join(root, "batch", "one.md"), "First evidence.\n", "utf8");
+    await writeFile(path.join(root, "batch", "two.md"), "Second evidence.\n", "utf8");
+    const failing = new Error("commit rejected");
+    store.mutateManaged = async () => {
+      throw failing;
+    };
+
+    expect(await ingestCode(() => knowledge.ingestMany({ directory: "batch" })))
+      .toBe("INGEST_COMMIT_FAILED");
+    expect(await readdir(path.join(root, "raw"))).toHaveLength(0);
+    expect(await readdir(path.join(root, ".metis", "cache", "text-v1"))).toHaveLength(0);
+  });
+});
+
 describe("ingestion error codes", () => {
   it("rejects malformed requests with distinguishable codes", async () => {
     const { knowledge } = await fixture();
@@ -705,6 +876,71 @@ describe("ingestion over MCP", () => {
         method: "vision",
         model: CHEAPEST_VISION_MODEL,
       }));
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("reports a mixed batch as one result with per-item outcomes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "metis-batch-mcp-"));
+    temporaryDirectories.push(root);
+    const { server } = await createStudyServer(root);
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    try {
+      await mkdir(path.join(root, "inbox"), { recursive: true });
+      await writeFile(path.join(root, "inbox", "chain-rule.md"), "The chain rule differentiates a composition.\n", "utf8");
+      await writeFile(path.join(root, "inbox", "broken.txt"), Buffer.from([0x48, 0x69, 0xff, 0xfe]));
+      await writeFile(path.join(root, "inbox", "deck.key"), "unsupported", "utf8");
+
+      const result = await client.callTool({
+        name: "ingest_sources",
+        arguments: { directory: "inbox", tags: ["inbox"] },
+      });
+      expect(result.isError).not.toBe(true);
+      const payload = JSON.parse(
+        (result.content as Array<{ text: string }>)[0]!.text,
+      ) as {
+        ingested: number;
+        failed: number;
+        skipped: number;
+        items: Array<{
+          sourcePath: string;
+          status: string;
+          source?: { id: string };
+          error?: { code: string; retryable: boolean };
+        }>;
+      };
+      expect(payload).toEqual(expect.objectContaining({
+        requested: 2,
+        ingested: 1,
+        duplicates: 0,
+        failed: 1,
+        skipped: 1,
+      }));
+      expect(payload.items.find((item) => item.sourcePath === "inbox/chain-rule.md"))
+        .toEqual(expect.objectContaining({ status: "ingested" }));
+      expect(payload.items.find((item) => item.sourcePath === "inbox/broken.txt")?.error)
+        .toEqual(expect.objectContaining({
+          code: "EXTRACT_NOT_UTF8",
+          retryable: false,
+        }));
+
+      const empty = await client.callTool({
+        name: "ingest_sources",
+        arguments: { sourcePaths: ["inbox/chain-rule.md"], directory: "inbox" },
+      });
+      expect(empty.isError).toBe(true);
+      expect(JSON.parse((empty.content as Array<{ text: string }>)[0]!.text))
+        .toEqual({
+          error: expect.objectContaining({ code: "INGEST_INPUT_AMBIGUOUS" }),
+        });
     } finally {
       await client.close();
       await server.close();

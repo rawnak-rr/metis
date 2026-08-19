@@ -344,6 +344,52 @@ function registerTools(
   );
 
   server.registerTool(
+    "ingest_sources",
+    {
+      description: "Store many vault files as immutable searchable evidence in one call: either an explicit 'sourcePaths' list or a 'directory' to scan. Titles come from filenames. Extraction is per file, so one unreadable file is reported in 'items' with its own 'error.code' while the rest succeed; the state commit is shared, so the batch costs one write. Metis-managed 'raw/', 'wiki/', and '.metis/' are never scanned.",
+      inputSchema: {
+        sourcePaths: z.array(z.string().min(1)).min(1).max(200).optional()
+          .describe("Vault-relative files; mutually exclusive with directory"),
+        directory: z.string().min(1).optional()
+          .describe("Vault-relative directory to scan; mutually exclusive with sourcePaths"),
+        recursive: z.boolean().optional().describe("Scan subdirectories (directory only)"),
+        extensions: z.array(z.string().min(1).max(16)).max(20).optional()
+          .describe("Restrict a directory scan to these extensions"),
+        tags: z.array(z.string().min(1).max(100)).max(50).optional()
+          .describe("Applied to every source in the batch"),
+      },
+      annotations: writeAnnotations(false),
+    },
+    async (input) => codedResult(async () => {
+      const result = await knowledge.ingestMany(input);
+      return {
+        requested: result.requested,
+        ingested: result.ingested,
+        duplicates: result.duplicates,
+        failed: result.failed,
+        skipped: result.skipped,
+        items: result.items.map((item) => ({
+          sourcePath: item.sourcePath,
+          status: item.status,
+          ...(item.source
+            ? {
+              source: {
+                id: item.source.id,
+                title: item.source.title,
+                kind: item.source.kind,
+                checksum: item.source.checksum,
+                extraction: item.source.extraction,
+              },
+            }
+            : {}),
+          ...(item.error ? { error: item.error } : {}),
+        })),
+        suggestedConcepts: result.suggestedConcepts,
+      };
+    }),
+  );
+
+  server.registerTool(
     "upsert_wiki_page",
     {
       description: "Create or replace a concept page whose factual prose has validated inline raw-source citations.",

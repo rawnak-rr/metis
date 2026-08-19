@@ -46,6 +46,7 @@ describe("MCP surface", () => {
       const names = tools.tools.map((tool) => tool.name);
       expect(names).toEqual(expect.arrayContaining([
         "ingest_source",
+        "ingest_sources",
         "metis_repair",
         "metis_restore_backup",
         "list_metis_backups",
@@ -55,7 +56,7 @@ describe("MCP surface", () => {
         "get_knowledge_graph",
         "lint_wiki",
       ]));
-      expect(names).toHaveLength(10);
+      expect(names).toHaveLength(11);
 
       const repairPreview = await client.callTool({
         name: "metis_repair",

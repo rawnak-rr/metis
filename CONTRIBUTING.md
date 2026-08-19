@@ -20,7 +20,6 @@ PDF ingestion requires Poppler's `pdftotext`. PDF rendering requires `pdflatex`.
 - Never weaken a critical safety check merely to restore the aggregate score.
 - Add an ordered migration whenever persisted state or config changes.
 - Migrations must be deterministic, retryable, backed up, and must not modify `raw/`.
-- Document behavioral and schema changes in `CHANGELOG.md`.
 - Do not commit personal vaults, `.metis/`, raw study materials, exports, or evaluation output.
 
 ## Pull requests

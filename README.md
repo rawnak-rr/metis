@@ -9,6 +9,7 @@ Metis deliberately does one thing: ingest material, index it, route to the right
 ## What works
 
 - Ingest Markdown, plain text, PDF, LaTeX, CSV, TSV, JSON, or YAML from inside a vault, or send text directly.
+- Ingest a whole directory or file list in one call, with per-file outcomes and a single state commit.
 - Preserve a read-only raw copy with SHA-256 provenance, duplicate detection, and integrity verification on every read.
 - Build and persist a disposable checksum-keyed BM25 index during ingestion, then update it incrementally instead of rechunking and retokenizing unchanged sources for every query.
 - Compile concept pages whose factual prose has validated inline raw-source citations into an Obsidian-compatible wiki.
