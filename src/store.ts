@@ -22,6 +22,7 @@ import type {
   StudyState,
   WikiPageRecord,
 } from "./types.js";
+import { describeExtraction } from "./extract.js";
 import { migrateConfig, migrateState } from "./migrations.js";
 import {
   CURRENT_CONFIG_SCHEMA_VERSION,
@@ -43,7 +44,7 @@ import {
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 10_000;
 const STALE_LOCK_MS = 120_000;
-export const GENERATED_WIKI_FORMAT_VERSION = 1 as const;
+export const GENERATED_WIKI_FORMAT_VERSION = 2 as const;
 
 const EMPTY_STATE: StudyState = {
   schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
@@ -130,12 +131,16 @@ export class StudyStore {
       mkdir(path.join(this.metadataDir, "cache", "search-v1"), {
         recursive: true,
       }),
+      mkdir(path.join(this.metadataDir, "cache", "text-v1"), {
+        recursive: true,
+      }),
     ]);
     await Promise.all([
       safeExistingPath(this.root, "raw"),
       safeExistingPath(this.root, "wiki"),
       safeExistingPath(this.root, ".metis"),
       safeExistingPath(this.root, ".metis/cache/search-v1"),
+      safeExistingPath(this.root, ".metis/cache/text-v1"),
     ]);
     await Promise.all([
       mkdir(path.join(this.root, "wiki", "concepts"), { recursive: true }),
@@ -829,6 +834,8 @@ export class StudyStore {
       `title: ${yamlString(source.title)}`,
       `type: "source"`,
       `ingested: ${yamlString(source.ingestedAt)}`,
+      `kind: ${yamlString(source.kind)}`,
+      `extraction: ${yamlString(describeExtraction(source))}`,
       `tags: [${source.tags.map(yamlString).join(", ")}]`,
       "---",
       "",
@@ -838,6 +845,7 @@ export class StudyStore {
       `> ID: \`${source.id}\`  `,
       `> Raw file: [${source.relativePath}](../../${source.relativePath})  `,
       `> SHA-256: \`${source.checksum}\``,
+      `> Text extraction: \`${describeExtraction(source)}\``,
       "",
       "## Preview",
       "",

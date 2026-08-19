@@ -23,6 +23,7 @@ Metis deliberately does one thing: ingest material, index it, route to the right
 
 - Node.js 20 or newer
 - `pdftotext` from Poppler for PDF ingestion
+- `@anthropic-ai/sdk` and Claude API credentials for image ingestion (optional; only images need them)
 
 On macOS with Homebrew:
 
@@ -101,13 +102,58 @@ For a friend, share the repository, have them install the four requirements, and
 ## First workflow
 
 1. Connect Metis and ask the assistant to call `configure_study_vault`.
-2. Put source files anywhere inside the vault and call `ingest_source` with a vault-relative path, or pass direct text.
+2. Put source files anywhere inside the vault and call `ingest_source` with a vault-relative path, or pass direct text. See [Ingestion](#ingestion) for the supported formats and their failure codes.
 3. Ask the assistant to synthesize the source into one or more concept pages with `upsert_wiki_page`. Every factual prose block must include an inline raw-source citation such as `[src_ab12#L8-L14]`.
 4. Ask a question. The assistant should call `prepare_grounded_answer` before responding.
 5. Call `get_knowledge_graph` globally or with a `focusId` to inspect a bounded neighborhood.
 6. Run `lint_wiki` after major ingests to keep the knowledge base connected and trustworthy.
 
 For strict closed-book behavior, choose `sources_only`. The normal `sources_first` mode uses the vault whenever it can and permits outside knowledge only when the returned evidence packet identifies a gap. Outside additions must be labelled.
+
+## Ingestion
+
+`ingest_source` stores an immutable read-only copy under `raw/`, derives searchable text from it, and records how that text was derived. Nothing is committed until the text is in hand: a failed extraction leaves no source record, no raw copy, and no derived files behind.
+
+| Extension | Kind | Text extraction |
+| --- | --- | --- |
+| `.md`, `.markdown` | `markdown` | Body kept verbatim; YAML frontmatter blanked |
+| `.txt`, `.text` | `text` | Verbatim |
+| `.csv`, `.tsv`, `.json`, `.yaml`, `.yml` | `data` | Verbatim |
+| `.tex` | `latex` | Comments, preamble, environment markers, and bookkeeping macros blanked; sectioning commands become Markdown headings |
+| `.pdf` | `pdf` | Poppler `pdftotext -layout` |
+| `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` | `image` | Transcribed by a Claude vision model |
+
+Text extraction never changes a line's number, so a citation such as `[src_ab12#L8-L14]` addresses the same lines in the extracted text and in the raw file you can open in Obsidian.
+
+Non-PDF images are transcribed with `claude-haiku-4-5`, the cheapest Claude model with vision, because transcription is high volume and needs no reasoning. Set `METIS_VISION_MODEL` to use a stronger reader. Credentials are resolved by the Anthropic SDK (`ANTHROPIC_API_KEY`, or an `ant auth login` profile). Because a transcript cannot be re-derived byte-for-byte, it is persisted under `.metis/cache/text-v1/` and reused for every later read, duplicate ingestion, and repair — an image is never transcribed twice, and its line citations stay stable. PDF text is cached the same way. Every source record carries its extraction method, media type, and transcribing model, and the generated provenance page shows them, so model-transcribed evidence is never mistaken for verbatim text.
+
+Text sources must be valid UTF-8; a byte-order mark is accepted and stripped. Text and PDF sources are capped at 32 MiB, images at 5 MiB.
+
+A failed ingestion returns a stable `error.code` plus `error.retryable`, so callers branch on the code rather than on message text:
+
+| Code | Meaning |
+| --- | --- |
+| `INGEST_TITLE_EMPTY` | Title was blank |
+| `INGEST_INPUT_AMBIGUOUS` | Neither or both of `content` and `sourcePath` were given |
+| `INGEST_CONTENT_EMPTY` | Inline content had no text |
+| `INGEST_UNSUPPORTED_TYPE` | Extension is not in the table above |
+| `INGEST_SOURCE_NOT_FOUND` | No file at that vault-relative path |
+| `INGEST_SOURCE_NOT_A_FILE` | Path is a directory or special file |
+| `INGEST_PATH_OUTSIDE_VAULT` | Path or symlink resolves outside the vault |
+| `INGEST_SOURCE_TOO_LARGE` | Above the size cap for that kind |
+| `EXTRACT_NOT_UTF8` | Bytes are binary or another encoding |
+| `EXTRACT_EMPTY_TEXT` | Extraction produced no citable text |
+| `EXTRACT_PDF_TOOL_MISSING` | `pdftotext` is not on `PATH` |
+| `EXTRACT_PDF_FAILED` | PDF is encrypted, damaged, or image-only |
+| `EXTRACT_VISION_UNAVAILABLE` | Optional `@anthropic-ai/sdk` is not installed |
+| `EXTRACT_VISION_NOT_CONFIGURED` | Claude credentials are missing or rejected |
+| `EXTRACT_VISION_RATE_LIMITED` | Retryable; the model is rate limited |
+| `EXTRACT_VISION_REFUSED` | The model declined to transcribe the image |
+| `EXTRACT_VISION_TRUNCATED` | Transcript hit the output limit; split the image |
+| `EXTRACT_VISION_FAILED` | Retryable; the transcription request failed |
+| `INGEST_COPY_VERIFICATION_FAILED` | Stored copy did not match the input checksum |
+| `INGEST_COMMIT_FAILED` | Retryable; the managed transaction did not commit |
+| `SOURCE_INTEGRITY_FAILED` | A stored raw copy no longer matches its checksum |
 
 ## Vault layout
 
@@ -123,6 +169,7 @@ Obsidian Vault/
 └── .metis/
     ├── backups/               checksummed managed-file update snapshots
     ├── cache/search-v1/       disposable checksum-keyed search indexes
+    ├── cache/text-v1/         PDF and image text derived once per checksum
     ├── skills/                generated grounding and maintenance Agent Skills
     ├── config.json            local configuration
     ├── repair.json            last successful repair and derivation versions
@@ -169,8 +216,9 @@ The scored MCP evaluation harness runs separately with `npm run eval`. It talks 
 ## Current boundaries
 
 - Retrieval is local BM25-style lexical search behind a direct keyed concept map and checksum-keyed incremental inverted index. Lexical matching is the kernel's weakest layer and the current focus of work. Derived per-source indexes are disposable and versioned; selected line spans are rehydrated only after the raw source checksum is verified. An optional embedding or hybrid reranker can be added without changing the vault format.
-- PDF ingestion extracts embedded text with `pdftotext`. OCR for scanned PDFs is not yet included, and extracted text is not yet checksummed independently of the source PDF.
-- Ingestion is structure-blind: `.csv`, `.json`, and `.yaml` sources are chunked as prose.
+- PDF ingestion extracts embedded text with `pdftotext`; a scanned, image-only PDF fails with `EXTRACT_PDF_FAILED` rather than being transcribed, so export its pages as images to read them.
+- Image transcription is a model output, not a verbatim reading. It is labelled as such on every source record and provenance page, but a transcript can still misread handwriting or dense notation. Its cache entry is the only copy: delete it and the next read re-transcribes, which needs credentials again and may shift line citations.
+- Ingestion is structure-blind: `.csv`, `.json`, and `.yaml` sources are chunked as prose, and a LaTeX `verbatim` environment has its `%` characters treated as comments.
 - The connected LLM performs explanation and wiki synthesis. Metis provides compact evidence packets, persistent state, and one-time server policy rather than embedding a specific model vendor.
 - Local state/log writes are serialized and cross-process locked; ingestion and wiki compilation also roll back generated files when their managed transaction fails. A future shared HTTP deployment still needs transactional multi-user storage and authentication.
 

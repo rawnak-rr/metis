@@ -577,10 +577,10 @@ describe("vault persistence and updates", () => {
 
     const updated = await reopened.updateVault();
     expect(updated.updated).toBe(true);
-    expect(updated.stateVersion).toBe(4);
+    expect(updated.stateVersion).toBe(5);
     expect(updated.configVersion).toBe(1);
     expect(updated.backupRelativePath).toMatch(/^\.metis\/backups\//);
-    expect(await reopened.readState()).toEqual(expect.objectContaining({ schemaVersion: 4 }));
+    expect(await reopened.readState()).toEqual(expect.objectContaining({ schemaVersion: 5 }));
     expect(await reopened.getConfig()).toEqual(expect.objectContaining({ schemaVersion: 1 }));
     await expect(readFile(rawSentinel, "utf8")).resolves.toBe("raw evidence is never migrated");
 
@@ -639,7 +639,7 @@ describe("vault persistence and updates", () => {
     await reopened.updateVault();
 
     const migrated = await reopened.readState();
-    expect(migrated.schemaVersion).toBe(4);
+    expect(migrated.schemaVersion).toBe(5);
     expect(migrated.wikiPages[0]!.aliases).toEqual([]);
     await expect(readFile(
       path.join(root, "wiki", "concepts", "fractions.md"),
@@ -683,7 +683,7 @@ describe("vault persistence and updates", () => {
       dryRun: true,
       restored: false,
       restoredFrom: backup,
-      stateVersion: 4,
+      stateVersion: 5,
     }));
     expect((await store.readState()).concepts).toHaveLength(2);
 
@@ -829,7 +829,7 @@ describe("vault persistence and updates", () => {
       }),
     }));
     const repairedState = await reopened.readState();
-    expect(repairedState.schemaVersion).toBe(4);
+    expect(repairedState.schemaVersion).toBe(5);
     expect(repairedState.wikiPages[0]?.summary).toMatch(
       /^Recovered evidence: Mitochondria produce ATP/,
     );

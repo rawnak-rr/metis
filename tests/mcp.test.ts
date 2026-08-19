@@ -64,7 +64,7 @@ describe("MCP surface", () => {
       expect(toolObject(repairPreview)).toEqual(expect.objectContaining({
         dryRun: true,
         repaired: false,
-        migration: expect.objectContaining({ targetStateVersion: 4 }),
+        migration: expect.objectContaining({ targetStateVersion: 5 }),
       }));
 
       const ingested = await client.callTool({

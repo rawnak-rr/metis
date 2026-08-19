@@ -3,7 +3,7 @@ import { sha256, unique } from "./util.js";
 
 export const SEARCH_INDEX_FORMAT_VERSION = 1 as const;
 export const SEARCH_INDEX_DERIVATION_VERSION = [
-  "text-parser-v1",
+  "text-parser-v2",
   "chunks-14-2-1400",
   "tokenizer-v1",
 ].join(":");

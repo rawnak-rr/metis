@@ -449,7 +449,7 @@ try {
       && update.repaired === true
       && (update.wikiHealth as Record<string, unknown>).healthy === true
       && (update.skills as Record<string, unknown>).version === 1
-      && migratedState.schemaVersion === 4
+      && migratedState.schemaVersion === 5
       && (migratedState.wikiPages as Array<Record<string, unknown>>)
         .every((page) => Array.isArray(page.aliases))
       && migratedConfig.schemaVersion === 1

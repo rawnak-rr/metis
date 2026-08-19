@@ -1,11 +1,20 @@
-# Changelog
-
-All notable changes to Metis will be documented here.
-
 ## [Unreleased]
 
 ### Changed
 
+- Markdown ingestion drops YAML frontmatter, and LaTeX ingestion drops comments, the
+  preamble, environment markers, and bookkeeping macros while converting sectioning
+  commands to Markdown headings. Both blank lines in place, so citation line numbers keep
+  addressing the raw file.
+- Text sources must be valid UTF-8; a byte-order mark is accepted and stripped. Text and
+  PDF sources are capped at 32 MiB and images at 5 MiB.
+- A duplicate ingestion reuses stored text instead of re-extracting it.
+- A failed ingestion removes its read-only raw copy and derived text instead of leaving
+  orphans in the vault.
+- State schema v5 adds the `image` source kind and the required `extraction` descriptor;
+  the v4 to v5 migration infers the method of existing sources from their kind.
+- The search-index derivation version and generated-wiki format version advanced, so
+  repair rebuilds indexes and refreshes provenance pages under the new extraction rules.
 - Reduced Metis to a grounding kernel. Removed spaced repetition, practice generation,
   mastery/confidence tracking, misconceptions, goals, session planning, constrained
   mathematics, and LaTeX PDF output. The MCP surface is now 10 tools and one prompt.
@@ -18,6 +27,17 @@ All notable changes to Metis will be documented here.
 
 ### Added
 
+- Image ingestion: `.png`, `.jpg`, `.jpeg`, `.gif`, and `.webp` sources are transcribed
+  with `claude-haiku-4-5`, the cheapest Claude model with vision, overridable through
+  `METIS_VISION_MODEL`. The Anthropic SDK is an optional dependency loaded on first use.
+- Persisted derived text under `.metis/cache/text-v1/`, so a PDF is extracted and an image
+  transcribed exactly once per checksum and image line citations stay stable across reads,
+  duplicate ingestions, and repair. An image whose transcript cannot be persisted is not
+  ingested at all, since re-running the model would not reproduce its line numbers.
+- Stable ingestion failure codes with a `retryable` flag, returned by `ingest_source` as a
+  structured `error` result instead of an opaque protocol error.
+- Extraction provenance on every source record and generated provenance page: method,
+  media type, and transcribing model.
 - `metis_repair` CLI and MCP workflow with dry-run inspection, ordered migrations, checksummed rollback backups, generated knowledge repair, portable Agent Skill refresh, incremental/full search-index synchronization, downgrade refusal, and post-repair health reporting. `metis update` remains a CLI alias.
 - `metis_restore_backup` with restore previews, recovery backups, managed wiki swaps, and raw-source preservation.
 - `list_metis_backups` with complete checksum verification and invalid-backup reporting.

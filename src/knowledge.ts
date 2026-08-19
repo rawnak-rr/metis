@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
 import { chmod, copyFile, readFile, readdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import type {
   CompactConceptCapsule,
   ConceptCapsule,
@@ -29,10 +27,24 @@ import {
   tokenize,
   type RankedIndexedChunk,
 } from "./retrieval.js";
+import { MetisError } from "./errors.js";
+import {
+  SUPPORTED_SOURCE_EXTENSIONS,
+  describeExtraction,
+  descriptorForSource,
+  extractSourceText,
+  isDerivedTextPersisted,
+  maxBytesFor,
+  sourceTypeFor,
+  type SourceTypeDescriptor,
+} from "./extract.js";
+import { defaultVisionTranscriber, type VisionTranscriber } from "./vision.js";
 
 export { tokenize } from "./retrieval.js";
 
-const execFileAsync = promisify(execFile);
+const DERIVED_TEXT_FORMAT_VERSION = 1 as const;
+const DERIVED_TEXT_CACHE_DIRECTORY = ".metis/cache/text-v1";
+const SEARCH_INDEX_CACHE_DIRECTORY = ".metis/cache/search-v1";
 const WIKI_CITATION_PATTERN = /\[([A-Za-z0-9_-]+)#L(\d+)-L(\d+)\]/g;
 const MAX_CITATION_LINES = 80;
 export const CONTEXT_LIMITS = {
@@ -47,19 +59,6 @@ export const CONTEXT_LIMITS = {
 const GENERIC_SUPPORT_WORDS = new Set([
   "claim", "concept", "evidence", "fact", "information", "note", "page", "source",
 ]);
-
-const MIME_KIND: Record<string, SourceRecord["kind"]> = {
-  ".md": "markdown",
-  ".markdown": "markdown",
-  ".txt": "text",
-  ".pdf": "pdf",
-  ".tex": "latex",
-  ".csv": "data",
-  ".tsv": "data",
-  ".json": "data",
-  ".yaml": "data",
-  ".yml": "data",
-};
 
 export interface IngestInput {
   title: string;
@@ -124,6 +123,10 @@ export interface KnowledgeRepairResult {
     staleEntriesRemoved: number;
     indexedSources: number;
     indexedChunks: number;
+  };
+  derivedText: {
+    retained: number;
+    staleEntriesRemoved: number;
   };
 }
 
@@ -201,7 +204,14 @@ export class KnowledgeService {
     ...EMPTY_RETRIEVAL_DIAGNOSTICS,
   };
 
-  constructor(private readonly store: StudyStore) {}
+  private readonly vision: VisionTranscriber;
+
+  constructor(
+    private readonly store: StudyStore,
+    vision: VisionTranscriber = defaultVisionTranscriber(),
+  ) {
+    this.vision = vision;
+  }
 
   getRetrievalDiagnostics(): RetrievalDiagnostics {
     return {
@@ -316,6 +326,7 @@ export class KnowledgeService {
     );
     if (!dryRun) await this.store.rebuildWikiIndex();
     const searchIndex = await this.repairSearchIndex(state.sources, mode, dryRun);
+    const derivedText = await this.repairDerivedText(state.sources, dryRun);
     return {
       mode,
       dryRun,
@@ -340,102 +351,198 @@ export class KnowledgeService {
         untrackedManagedFilesRemoved,
       },
       searchIndex,
+      derivedText,
     };
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
     const title = input.title.trim();
-    if (!title) throw new Error("Source title cannot be empty.");
+    if (!title) {
+      throw new MetisError("INGEST_TITLE_EMPTY", "Source title cannot be empty.");
+    }
     if ((input.content === undefined) === (input.sourcePath === undefined)) {
-      throw new Error("Provide exactly one of content or sourcePath.");
+      throw new MetisError(
+        "INGEST_INPUT_AMBIGUOUS",
+        "Provide exactly one of content or sourcePath.",
+      );
     }
 
-    let bytes: Buffer;
-    let extractedText: string;
-    let extension: string;
-    let originalPath: string | undefined;
-    let inputAbsolute: string | undefined;
-    if (input.sourcePath !== undefined) {
-      inputAbsolute = await this.store.resolveExisting(input.sourcePath);
-      extension = path.extname(input.sourcePath).toLowerCase();
-      if (!(extension in MIME_KIND)) {
-        throw new Error(`Unsupported source type '${extension || "(none)"}'. Supported: ${Object.keys(MIME_KIND).join(", ")}`);
-      }
-      bytes = await readFile(inputAbsolute);
-      extractedText = extension === ".pdf"
-        ? await this.extractPdf(inputAbsolute)
-        : bytes.toString("utf8");
-      originalPath = input.sourcePath;
-    } else {
-      extension = ".md";
-      extractedText = input.content ?? "";
-      bytes = Buffer.from(extractedText, "utf8");
-    }
+    const staged = input.sourcePath === undefined
+      ? stageInlineContent(input.content ?? "", title)
+      : await this.stageVaultFile(input.sourcePath, title);
 
-    const checksum = sha256(bytes);
+    const checksum = sha256(staged.bytes);
     const current = await this.store.readState();
     const existing = current.sources.find((source) => source.checksum === checksum);
     if (existing) {
-      await this.readVerifiedSourceBytes(existing);
-      await this.indexIngestedSource(existing, extractedText);
+      // Identical bytes already carry verified text; never pay for extraction,
+      // and never re-transcribe an image, to answer a duplicate ingestion.
+      const text = await this.readSourceText(existing);
+      await this.indexIngestedSource(existing, text);
       return {
         source: existing,
         duplicate: true,
-        preview: this.preview(extractedText),
-        suggestedConcepts: this.suggestConcepts(extractedText),
+        preview: this.preview(text),
+        suggestedConcepts: this.suggestConcepts(text),
       };
     }
 
     const sourceId = newId("src");
-    const targetName = `${sourceId}-${sanitizeFilename(title, "source")}${extension}`;
-    const targetRelative = path.posix.join("raw", targetName);
-    const targetAbsolute = await this.store.resolveForWrite(targetRelative);
-    if (inputAbsolute !== undefined) {
-      await copyFile(inputAbsolute, targetAbsolute);
-    } else {
-      await atomicWrite(targetAbsolute, extractedText);
-    }
-    const storedBytes = await readFile(targetAbsolute);
-    if (sha256(storedBytes) !== checksum) {
-      throw new Error("Source copy verification failed before ingestion was committed.");
-    }
-    await chmod(targetAbsolute, 0o444);
-
-    const source: SourceRecord = {
-      id: sourceId,
-      title,
-      kind: MIME_KIND[extension] ?? "text",
-      relativePath: targetRelative,
-      checksum,
-      tags: unique((input.tags ?? []).map((tag) => tag.trim()).filter(Boolean)),
-      ingestedAt: nowIso(),
-      ...(originalPath ? { originalPath } : {}),
-    };
-    const preview = this.preview(extractedText);
-    await this.store.mutateManaged(
-      (state) => {
-        state.sources.push(source);
-      },
-      () => ({
-        sourcePages: [{ source, preview }],
-        rebuildWikiIndex: true,
-        log: {
-          operation: "ingest",
-          title: source.title,
-          details: [
-            `Source ID: \`${source.id}\``,
-            `Stored immutable raw copy at \`${source.relativePath}\``,
-            `Checksum: \`${source.checksum}\``,
-          ],
-        },
-      }),
+    const targetRelative = path.posix.join(
+      "raw",
+      `${sourceId}-${sanitizeFilename(title, "source")}${staged.extension}`,
     );
-    await this.indexIngestedSource(source, extractedText);
+    let rawCopyAbsolute: string | undefined;
+    let derivedTextWritten = false;
+    try {
+      const targetAbsolute = await resolveIngestTarget(this.store, targetRelative);
+      if (staged.absolutePath === undefined) {
+        await atomicWrite(targetAbsolute, staged.bytes.toString("utf8"));
+      } else {
+        await copyFile(staged.absolutePath, targetAbsolute);
+      }
+      rawCopyAbsolute = targetAbsolute;
+
+      const storedBytes = await readFile(targetAbsolute);
+      if (sha256(storedBytes) !== checksum) {
+        throw new MetisError(
+          "INGEST_COPY_VERIFICATION_FAILED",
+          "Source copy verification failed before ingestion was committed.",
+        );
+      }
+      await chmod(targetAbsolute, 0o444);
+
+      const extracted = await extractSourceText({
+        descriptor: staged.descriptor,
+        bytes: storedBytes,
+        absolutePath: targetAbsolute,
+        title,
+        transcriber: this.vision,
+      });
+      if (!extracted.text.trim()) {
+        throw new MetisError(
+          "EXTRACT_EMPTY_TEXT",
+          `No searchable text could be extracted from '${title}', so it cannot be stored as citable evidence.`,
+        );
+      }
+
+      const source: SourceRecord = {
+        id: sourceId,
+        title,
+        kind: staged.descriptor.kind,
+        relativePath: targetRelative,
+        checksum,
+        tags: unique((input.tags ?? []).map((tag) => tag.trim()).filter(Boolean)),
+        ingestedAt: nowIso(),
+        extraction: {
+          method: staged.descriptor.method,
+          ...(staged.descriptor.mediaType
+            ? { mediaType: staged.descriptor.mediaType }
+            : {}),
+          ...(extracted.model ? { model: extracted.model } : {}),
+          ...(isDerivedTextPersisted(staged.descriptor.method)
+            ? { extractedAt: nowIso() }
+            : {}),
+        },
+        ...(staged.originalPath ? { originalPath: staged.originalPath } : {}),
+      };
+      derivedTextWritten = await this.persistDerivedText(source, extracted.text);
+      if (!derivedTextWritten && source.extraction.method === "vision") {
+        // A transcript is the only record of an image's text, and re-running the
+        // model would not reproduce it, so abandon rather than store evidence
+        // whose line citations cannot be recovered.
+        throw new MetisError(
+          "INGEST_COMMIT_FAILED",
+          `The transcript for '${title}' could not be persisted under ${DERIVED_TEXT_CACHE_DIRECTORY}, so ingestion was abandoned.`,
+        );
+      }
+
+      const preview = this.preview(extracted.text);
+      await this.store.mutateManaged(
+        (state) => {
+          state.sources.push(source);
+        },
+        () => ({
+          sourcePages: [{ source, preview }],
+          rebuildWikiIndex: true,
+          log: {
+            operation: "ingest",
+            title: source.title,
+            details: [
+              `Source ID: \`${source.id}\``,
+              `Stored immutable raw copy at \`${source.relativePath}\``,
+              `Checksum: \`${source.checksum}\``,
+              `Text extraction: \`${describeExtraction(source)}\``,
+            ],
+          },
+        }),
+      );
+      await this.indexIngestedSource(source, extracted.text);
+      return {
+        source,
+        duplicate: false,
+        preview,
+        suggestedConcepts: this.suggestConcepts(extracted.text),
+      };
+    } catch (error) {
+      // Nothing is committed until state is written, so a failed ingestion must
+      // leave no read-only orphan under raw/ and no derived text behind.
+      if (rawCopyAbsolute) await discardFile(rawCopyAbsolute);
+      if (derivedTextWritten) await this.discardDerivedText(checksum);
+      throw ingestionFailure(error);
+    }
+  }
+
+  /** Resolve, size-check, and classify a vault-relative ingestion input. */
+  private async stageVaultFile(
+    sourcePath: string,
+    title: string,
+  ): Promise<StagedSource> {
+    const extension = path.extname(sourcePath).toLowerCase();
+    const descriptor = sourceTypeFor(extension);
+    if (!descriptor) {
+      throw new MetisError(
+        "INGEST_UNSUPPORTED_TYPE",
+        `Unsupported source type '${extension || "(none)"}'. Supported: ${SUPPORTED_SOURCE_EXTENSIONS.join(", ")}`,
+      );
+    }
+    let absolutePath: string;
+    try {
+      absolutePath = await this.store.resolveExisting(sourcePath);
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "ENOENT") {
+        throw new MetisError(
+          "INGEST_SOURCE_NOT_FOUND",
+          `No file exists at vault-relative path '${sourcePath}'.`,
+          { cause: error },
+        );
+      }
+      throw new MetisError(
+        "INGEST_PATH_OUTSIDE_VAULT",
+        error instanceof Error ? error.message : String(error),
+        { cause: error },
+      );
+    }
+    const details = await stat(absolutePath);
+    if (!details.isFile()) {
+      throw new MetisError(
+        "INGEST_SOURCE_NOT_A_FILE",
+        `Vault-relative path '${sourcePath}' is not a regular file.`,
+      );
+    }
+    const limit = maxBytesFor(descriptor);
+    if (details.size > limit) {
+      throw new MetisError(
+        "INGEST_SOURCE_TOO_LARGE",
+        `Source '${title}' is ${details.size} bytes, above the ${limit}-byte limit for ${descriptor.kind} sources. Split it into smaller documents.`,
+      );
+    }
     return {
-      source,
-      duplicate: false,
-      preview,
-      suggestedConcepts: this.suggestConcepts(extractedText),
+      bytes: await readFile(absolutePath),
+      extension,
+      descriptor,
+      absolutePath,
+      originalPath: sourcePath,
     };
   }
 
@@ -865,12 +972,7 @@ export class KnowledgeService {
   }
 
   private searchIndexRelativePath(source: SourceRecord): string {
-    return path.posix.join(
-      ".metis",
-      "cache",
-      "search-v1",
-      `${source.checksum}.json`,
-    );
+    return path.posix.join(SEARCH_INDEX_CACHE_DIRECTORY, `${source.checksum}.json`);
   }
 
   private recordRetrievalDiagnostics(
@@ -1025,36 +1127,60 @@ export class KnowledgeService {
       await this.persistSourceIndex(source);
     }
 
-    const expectedEntries = new Set(
-      sources.map((source) => `${source.checksum}.json`),
+    const staleEntriesRemoved = await this.pruneDerivedCache(
+      SEARCH_INDEX_CACHE_DIRECTORY,
+      new Set(sources.map((source) => `${source.checksum}.json`)),
+      dryRun,
     );
-    const cacheRoot = await this.store.resolveExisting(
-      ".metis/cache/search-v1",
-    );
-    const cacheEntries = await readdir(cacheRoot, { withFileTypes: true });
-    const staleEntries = cacheEntries.filter((entry) =>
-      (entry.isFile() || entry.isSymbolicLink())
-      && !expectedEntries.has(entry.name));
-    if (!dryRun) {
-      for (const entry of staleEntries) {
-        await unlink(await this.store.resolveForWrite(path.posix.join(
-          ".metis",
-          "cache",
-          "search-v1",
-          entry.name,
-        )));
-      }
-    }
 
     return {
       reused,
       rebuilt,
-      staleEntriesRemoved: staleEntries.length,
+      staleEntriesRemoved,
       indexedSources: dryRun
         ? reused
         : this.retrievalIndex.sourceCount(),
       indexedChunks: this.retrievalIndex.chunkCount(),
     };
+  }
+
+  /**
+   * Derived text is only expected for sources whose extraction is expensive or
+   * non-deterministic; every other entry in the cache is stale.
+   */
+  private async repairDerivedText(
+    sources: SourceRecord[],
+    dryRun: boolean,
+  ): Promise<KnowledgeRepairResult["derivedText"]> {
+    const expected = new Set(sources
+      .filter((source) => isDerivedTextPersisted(source.extraction.method))
+      .map((source) => `${source.checksum}.json`));
+    const staleEntriesRemoved = await this.pruneDerivedCache(
+      DERIVED_TEXT_CACHE_DIRECTORY,
+      expected,
+      dryRun,
+    );
+    return { retained: expected.size, staleEntriesRemoved };
+  }
+
+  private async pruneDerivedCache(
+    relativeDirectory: string,
+    expectedEntries: ReadonlySet<string>,
+    dryRun: boolean,
+  ): Promise<number> {
+    const cacheRoot = await this.store.resolveExisting(relativeDirectory);
+    const entries = await readdir(cacheRoot, { withFileTypes: true });
+    const stale = entries.filter((entry) =>
+      (entry.isFile() || entry.isSymbolicLink())
+      && !expectedEntries.has(entry.name));
+    if (!dryRun) {
+      for (const entry of stale) {
+        await unlink(await this.store.resolveForWrite(
+          path.posix.join(relativeDirectory, entry.name),
+        ));
+      }
+    }
+    return stale.length;
   }
 
   private async pruneUntrackedWikiFiles(
@@ -1096,18 +1222,92 @@ export class KnowledgeService {
   }
 
   async readSourceText(source: SourceRecord): Promise<string> {
+    // Integrity is verified before any cached text is trusted, so tampering with
+    // a raw copy can never be masked by an earlier read.
     const { absolute, bytes } = await this.readVerifiedSourceBytes(source);
     const cached = this.sourceTextCache.get(source.id);
     if (cached?.checksum === source.checksum) return cached.text;
-    const text = source.kind === "pdf"
-      ? await this.extractPdf(absolute)
-      : bytes.toString("utf8");
-    if (source.kind === "pdf") await this.readVerifiedSourceBytes(source);
+    const descriptor = descriptorForSource(source);
+    const persistent = isDerivedTextPersisted(descriptor.method);
+    if (persistent) {
+      const stored = await this.readDerivedText(source);
+      if (stored !== undefined) {
+        this.sourceTextCache.set(source.id, { checksum: source.checksum, text: stored });
+        return stored;
+      }
+    }
+    const extracted = await extractSourceText({
+      descriptor,
+      bytes,
+      absolutePath: absolute,
+      title: source.title,
+      transcriber: this.vision,
+    });
+    if (persistent) await this.persistDerivedText(source, extracted.text);
     this.sourceTextCache.set(source.id, {
       checksum: source.checksum,
-      text,
+      text: extracted.text,
     });
-    return text;
+    return extracted.text;
+  }
+
+  /**
+   * Persist text whose derivation is expensive (PDF) or non-deterministic
+   * (vision), so repeated reads are cheap and image line citations stay stable.
+   * Returns whether a file was written.
+   */
+  private async persistDerivedText(
+    source: SourceRecord,
+    text: string,
+  ): Promise<boolean> {
+    if (!isDerivedTextPersisted(source.extraction.method)) return false;
+    try {
+      await atomicWrite(
+        await this.store.resolveForWrite(derivedTextRelativePath(source.checksum)),
+        `${JSON.stringify({
+          formatVersion: DERIVED_TEXT_FORMAT_VERSION,
+          sourceChecksum: source.checksum,
+          method: source.extraction.method,
+          ...(source.extraction.model ? { model: source.extraction.model } : {}),
+          extractedAt: source.extraction.extractedAt ?? nowIso(),
+          text,
+        })}\n`,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async readDerivedText(source: SourceRecord): Promise<string | undefined> {
+    try {
+      const raw = await this.store.readText(derivedTextRelativePath(source.checksum));
+      const value = JSON.parse(raw) as {
+        formatVersion?: unknown;
+        sourceChecksum?: unknown;
+        method?: unknown;
+        text?: unknown;
+      };
+      if (
+        value.formatVersion !== DERIVED_TEXT_FORMAT_VERSION
+        || value.sourceChecksum !== source.checksum
+        || value.method !== source.extraction.method
+        || typeof value.text !== "string"
+      ) {
+        return undefined;
+      }
+      return value.text;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async discardDerivedText(checksum: string): Promise<void> {
+    try {
+      await unlink(await this.store.resolveForWrite(derivedTextRelativePath(checksum)));
+    } catch {
+      // A missing or unreadable cache entry needs no cleanup.
+    }
   }
 
   async lintWiki(options: { log?: boolean } = {}): Promise<WikiLintResult> {
@@ -1304,7 +1504,8 @@ export class KnowledgeService {
     const bytes = await readFile(absolute);
     const actualChecksum = sha256(bytes);
     if (actualChecksum !== source.checksum) {
-      throw new Error(
+      throw new MetisError(
+        "SOURCE_INTEGRITY_FAILED",
         `Source integrity check failed for '${source.id}': expected ${source.checksum}, received ${actualChecksum}. The immutable raw copy may have been modified.`,
       );
     }
@@ -1395,17 +1596,6 @@ export class KnowledgeService {
     }
   }
 
-  private async extractPdf(absolutePath: string): Promise<string> {
-    try {
-      const { stdout } = await execFileAsync("pdftotext", ["-layout", "-nopgbrk", absolutePath, "-"], {
-        maxBuffer: 20 * 1024 * 1024,
-      });
-      return stdout;
-    } catch (error) {
-      throw new Error(`Could not extract PDF text. Install Poppler's pdftotext. ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
   private preview(text: string): string {
     const cleaned = text.trim();
     if (cleaned.length <= CONTEXT_LIMITS.sourcePreviewCharacters) return cleaned;
@@ -1427,6 +1617,77 @@ export class KnowledgeService {
       .map(([token]) => token);
     return unique([...headings.slice(0, 6), ...keywords]).slice(0, 8);
   }
+}
+
+interface StagedSource {
+  bytes: Buffer;
+  extension: string;
+  descriptor: SourceTypeDescriptor;
+  absolutePath?: string;
+  originalPath?: string;
+}
+
+/** Inline content is stored as Markdown, the format wiki synthesis expects. */
+function stageInlineContent(content: string, title: string): StagedSource {
+  if (!content.trim()) {
+    throw new MetisError(
+      "INGEST_CONTENT_EMPTY",
+      `Inline content for '${title}' is empty, so there is nothing to store as evidence.`,
+    );
+  }
+  const bytes = Buffer.from(content, "utf8");
+  const descriptor = sourceTypeFor(".md")!;
+  const limit = maxBytesFor(descriptor);
+  if (bytes.byteLength > limit) {
+    throw new MetisError(
+      "INGEST_SOURCE_TOO_LARGE",
+      `Inline content for '${title}' is ${bytes.byteLength} bytes, above the ${limit}-byte limit.`,
+    );
+  }
+  return { bytes, extension: ".md", descriptor };
+}
+
+async function resolveIngestTarget(
+  store: StudyStore,
+  relativePath: string,
+): Promise<string> {
+  try {
+    return await store.resolveForWrite(relativePath);
+  } catch (error) {
+    throw new MetisError(
+      "INGEST_PATH_OUTSIDE_VAULT",
+      error instanceof Error ? error.message : String(error),
+      { cause: error },
+    );
+  }
+}
+
+function derivedTextRelativePath(checksum: string): string {
+  return path.posix.join(DERIVED_TEXT_CACHE_DIRECTORY, `${checksum}.json`);
+}
+
+/** A read-only raw copy has to be made writable before it can be discarded. */
+async function discardFile(absolutePath: string): Promise<void> {
+  try {
+    await chmod(absolutePath, 0o644);
+  } catch {
+    // The copy may not exist yet; unlink below reports the real outcome.
+  }
+  try {
+    await unlink(absolutePath);
+  } catch {
+    // Nothing to remove.
+  }
+}
+
+/** Preserve coded failures; give every other ingestion failure a stable code. */
+function ingestionFailure(error: unknown): unknown {
+  if (error instanceof MetisError) return error;
+  return new MetisError(
+    "INGEST_COMMIT_FAILED",
+    error instanceof Error ? error.message : String(error),
+    { cause: error },
+  );
 }
 
 export function compactConceptCapsule(

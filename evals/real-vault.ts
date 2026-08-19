@@ -142,7 +142,7 @@ try {
     Array.isArray(state[key]) ? state[key].length : -1;
   check(
     "real_vault.migration_preserves_state_and_raw",
-    migratedState.schemaVersion === 4
+    migratedState.schemaVersion === 5
       && ["sources", "wikiPages", "concepts"]
         .every((key) => count(originalState, key) === count(migratedState, key))
       && copiedRawBefore === copiedRawAfter

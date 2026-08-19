@@ -8,10 +8,13 @@ import {
   compactConceptCapsule,
   type WikiLintResult,
 } from "./knowledge.js";
+import { errorPayload } from "./errors.js";
+import { SUPPORTED_SOURCE_EXTENSIONS } from "./extract.js";
 import { GroundingService } from "./grounding.js";
 import { RepairService } from "./repair.js";
 import { StudyStore } from "./store.js";
 import type { GroundingMode } from "./types.js";
+import type { VisionTranscriber } from "./vision.js";
 import { METIS_VERSION } from "./version.js";
 
 const groundingSchema = z.enum(["sources_only", "sources_first", "open"]);
@@ -26,10 +29,13 @@ export interface StudyServer {
   repair: RepairService;
 }
 
-export async function createStudyServer(root: string): Promise<StudyServer> {
+export async function createStudyServer(
+  root: string,
+  options: { vision?: VisionTranscriber } = {},
+): Promise<StudyServer> {
   const store = new StudyStore(root);
   await store.initialize();
-  const knowledge = new KnowledgeService(store);
+  const knowledge = new KnowledgeService(store, options.vision);
   const grounding = new GroundingService(store, knowledge);
   const repair = new RepairService(store, knowledge);
   const server = new McpServer({
@@ -311,7 +317,7 @@ function registerTools(
   server.registerTool(
     "ingest_source",
     {
-      description: "Store text or a vault-relative Markdown, text, PDF, LaTeX, CSV, JSON, or YAML file as immutable searchable evidence.",
+      description: `Store text, or a vault-relative file, as immutable searchable evidence. Supported file types: ${SUPPORTED_SOURCE_EXTENSIONS.join(", ")}. PDFs are extracted with pdftotext, images are transcribed with a cheap Claude vision model, Markdown keeps its body while frontmatter is dropped, and LaTeX is reduced to prose with original line numbers preserved. A failure returns a stable 'error.code' to branch on.`,
       inputSchema: {
         title: z.string().min(1).max(200),
         content: z.string().optional().describe("Direct source text; mutually exclusive with sourcePath"),
@@ -320,20 +326,21 @@ function registerTools(
       },
       annotations: writeAnnotations(false),
     },
-    async (input) => {
+    async (input) => codedResult(async () => {
       const result = await knowledge.ingest(input);
-      return jsonResult({
+      return {
         source: {
           id: result.source.id,
           title: result.source.title,
           kind: result.source.kind,
           checksum: result.source.checksum,
           tags: result.source.tags,
+          extraction: result.source.extraction,
         },
         duplicate: result.duplicate,
         suggestedConcepts: result.suggestedConcepts,
-      });
-    },
+      };
+    }),
   );
 
   server.registerTool(
@@ -469,6 +476,24 @@ function jsonResult(value: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value) }],
   };
+}
+
+/**
+ * Return a coded failure instead of an opaque protocol error, so a caller can
+ * branch on `error.code` and know from `error.retryable` whether to retry.
+ */
+async function codedResult(operation: () => Promise<unknown>) {
+  try {
+    return jsonResult(await operation());
+  } catch (error) {
+    return {
+      isError: true as const,
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ error: errorPayload(error) }),
+      }],
+    };
+  }
 }
 
 function variableString(value: string | string[] | undefined): string {

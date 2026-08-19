@@ -7,14 +7,39 @@ export interface StudyConfig {
   groundingDefault: GroundingMode;
 }
 
+/** Image media types accepted by the Claude Messages API. */
+export type ImageMediaType =
+  | "image/png"
+  | "image/jpeg"
+  | "image/gif"
+  | "image/webp";
+
+/** How a source's searchable text is derived from its immutable raw bytes. */
+export type ExtractionMethod =
+  | "verbatim"
+  | "markdown"
+  | "latex"
+  | "pdftotext"
+  | "vision";
+
+export interface SourceExtraction {
+  method: ExtractionMethod;
+  /** Image media type, recorded only for vision extraction. */
+  mediaType?: ImageMediaType;
+  /** Model that produced the transcript, recorded only for vision extraction. */
+  model?: string;
+  extractedAt?: string;
+}
+
 export interface SourceRecord {
   id: string;
   title: string;
-  kind: "text" | "markdown" | "pdf" | "data" | "latex";
+  kind: "text" | "markdown" | "pdf" | "data" | "latex" | "image";
   relativePath: string;
   checksum: string;
   tags: string[];
   ingestedAt: string;
+  extraction: SourceExtraction;
   originalPath?: string;
 }
 
@@ -37,7 +62,7 @@ export interface ConceptRecord {
 }
 
 export interface StudyState {
-  schemaVersion: 4;
+  schemaVersion: 5;
   sources: SourceRecord[];
   wikiPages: WikiPageRecord[];
   concepts: ConceptRecord[];

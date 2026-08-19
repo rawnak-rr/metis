@@ -86,6 +86,16 @@ const STATE_MIGRATIONS = new Map<number, Migration>([
       }),
     };
   }],
+  [4, (legacy) => ({
+    ...legacy,
+    schemaVersion: 5,
+    sources: arrayOrEmpty(legacy.sources).map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+      const source = value as JsonObject;
+      if (source.extraction && typeof source.extraction === "object") return source;
+      return { ...source, extraction: { method: legacyExtractionMethod(source.kind) } };
+    }),
+  })],
 ]);
 
 const CONFIG_MIGRATIONS = new Map<number, Migration>([
@@ -155,6 +165,17 @@ function migrate<T>(
     value: validate(current),
     actions,
   };
+}
+
+/**
+ * Sources predating schema v5 have no recorded extraction method; it is fully
+ * determined by the source kind, because vision extraction did not yet exist.
+ */
+function legacyExtractionMethod(kind: unknown): string {
+  if (kind === "pdf") return "pdftotext";
+  if (kind === "markdown") return "markdown";
+  if (kind === "latex") return "latex";
+  return "verbatim";
 }
 
 function arrayOrEmpty(value: unknown): unknown[] {

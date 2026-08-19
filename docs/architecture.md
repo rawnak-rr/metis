@@ -6,6 +6,8 @@ Metis is a grounding kernel. It separates evidence, synthesis, and model interac
 
 `KnowledgeService` ingests source bytes into read-only raw copies, computes provenance, rechecks their SHA-256 digest on every read, extracts searchable text, and manages compiled wiki pages. Existing input and raw-source paths are resolved through their canonical filesystem paths so vault symlinks cannot escape the configured root. Search chunks retain line boundaries; overlapping spans and repeated support sentences are deduplicated; citation tokens identify exact raw-source spans.
 
+Text derivation is per-format and line-preserving. Markdown keeps its body and blanks frontmatter; LaTeX blanks comments, the preamble, environment markers, and bookkeeping macros, and rewrites sectioning commands as Markdown headings; PDFs go through `pdftotext`; images are transcribed by the cheapest Claude vision model. Because every branch blanks lines rather than deleting them, a citation addresses the same line in the extracted text and in the raw file. Text branches are pure functions of the stored bytes, so they are recomputed freely; PDF and vision text is persisted per checksum under `.metis/cache/text-v1/`, because a transcript cannot be re-derived byte-for-byte and shifting it would move every line citation. Each source records its extraction method and transcribing model, so model-transcribed evidence is distinguishable from a verbatim reading. Ingestion is transactional in both directions: nothing is recorded until text exists, and a failure removes the read-only raw copy and derived text it staged. Failures carry stable machine-readable codes and a retryable flag rather than only prose.
+
 Ingestion also creates a versioned per-source search index keyed by the raw checksum. The in-memory inverted index is updated only for new or changed source records; on restart, compatible derived entries are restored from `.metis/cache/search-v1/`, while absent or incompatible entries rebuild from verified raw evidence. BM25 queries visit matching posting lists rather than retokenizing every chunk. Cached text is never returned directly: selected line spans are rehydrated from a freshly checksum-verified source, and a mismatched derived chunk is rebuilt automatically.
 
 Concept pages require known source IDs and inline citations on factual prose. Citation ranges are checked against the referenced raw source, and an intentionally conservative lexical check requires at least half of each block's distinctive terms to occur in its cited excerpts. Compiled wiki pages remain useful synthesis and human-readable notes, but they never become authoritative answer evidence.
@@ -52,7 +54,7 @@ The stable vault format allows later additions without migration of user-authore
 
 - hybrid embeddings and reranking;
 - entailment-based facet status and citation gating;
-- OCR, structure-aware chunking, and richer document parsers;
+- structure-aware chunking and richer document parsers;
 - independently checksummed extracted text for non-plaintext sources;
 - graph visualization and prerequisite inference;
 - HTTP transport, user accounts, and shared vaults;
