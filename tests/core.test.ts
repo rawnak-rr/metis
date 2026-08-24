@@ -977,7 +977,7 @@ describe("vault persistence and updates", () => {
       path.join(root, "wiki", "concepts", "untracked.md"),
       "utf8",
     )).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await repairedKnowledge.search("What produces ATP?", 1, "sources"))
+    expect(await repairedKnowledge.search("What produces ATP?", 1))
       .toEqual([expect.objectContaining({ documentId: ingested.source.id })]);
 
     const second = await repair.repair();

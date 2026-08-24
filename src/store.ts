@@ -70,6 +70,10 @@ export interface VaultInspection {
 export interface VaultUpdateResult extends VaultInspection {
   dryRun: boolean;
   updated: boolean;
+  /** Schema versions found on disk before this call, for migration reporting. */
+  previousStateVersion: number;
+  previousConfigVersion: number;
+  updateWasRequired: boolean;
   backupRelativePath?: string;
   actions: string[];
 }
@@ -91,6 +95,13 @@ export interface VaultBackupSummary {
   configVersion?: number;
   integrity: "valid" | "invalid";
   issue?: string;
+}
+
+interface ValidatedBackup {
+  root: string;
+  stateVersion: number;
+  configVersion: number;
+  createdAt?: string;
 }
 
 export interface ManagedMutationEffects {
@@ -430,6 +441,9 @@ export class StudyStore {
           ...base,
           dryRun: true,
           updated: false,
+          previousStateVersion: base.stateVersion,
+          previousConfigVersion: base.configVersion,
+          updateWasRequired: base.updateRequired,
           actions: plannedActions,
         };
       }
@@ -456,7 +470,9 @@ export class StudyStore {
         }
       } catch (error) {
         try {
-          await this.restoreManagedFiles(backupRelativePath);
+          await this.restoreManagedFiles(
+            await this.validateBackup(backupRelativePath),
+          );
         } catch (restoreError) {
           throw new Error(
             `Metis schema migration failed and automatic rollback also failed. Migration error: ${messageOf(error)} Rollback error: ${messageOf(restoreError)} Manual backup: ${backupRelativePath}`,
@@ -474,6 +490,9 @@ export class StudyStore {
         generatedSchemaCurrent: true,
         dryRun: false,
         updated: true,
+        previousStateVersion: base.stateVersion,
+        previousConfigVersion: base.configVersion,
+        updateWasRequired: base.updateRequired,
         backupRelativePath,
         actions: plannedActions,
       };
@@ -510,7 +529,7 @@ export class StudyStore {
         schemaVersionOf(currentState),
         schemaVersionOf(currentConfig),
       );
-      await this.restoreManagedFiles(backupRelativePath);
+      await this.restoreManagedFiles(backup);
       await this.appendLogFile("restore", "Metis vault backup restored", [
         `Restored from: \`${backupRelativePath}\``,
         `Recovery backup of replaced files: \`${recoveryBackupRelativePath}\``,
@@ -548,13 +567,10 @@ export class StudyStore {
           const relativePath = path.posix.join(backupsRelative, entry.name);
           try {
             const validated = await this.validateBackup(relativePath);
-            const manifest = JSON.parse(
-              await readFile(path.join(validated.root, "manifest.json"), "utf8"),
-            ) as { createdAt?: unknown };
             return {
               relativePath,
-              ...(typeof manifest.createdAt === "string"
-                ? { createdAt: manifest.createdAt }
+              ...(validated.createdAt !== undefined
+                ? { createdAt: validated.createdAt }
                 : {}),
               stateVersion: validated.stateVersion,
               configVersion: validated.configVersion,
@@ -643,11 +659,9 @@ export class StudyStore {
     return path.posix.join(".metis", "backups", directoryName);
   }
 
-  private async validateBackup(backupRelativePath: string): Promise<{
-    root: string;
-    stateVersion: number;
-    configVersion: number;
-  }> {
+  private async validateBackup(
+    backupRelativePath: string,
+  ): Promise<ValidatedBackup> {
     const normalized = backupRelativePath.replaceAll("\\", "/");
     if (!/^\.metis\/backups\/[^/]+$/.test(normalized)) {
       throw new Error("Backup path must name one direct child of '.metis/backups/'.");
@@ -668,6 +682,7 @@ export class StudyStore {
     await safeExistingPath(this.root, path.posix.join(normalized, "wiki"));
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
       backupFormatVersion?: unknown;
+      createdAt?: unknown;
       stateVersion?: unknown;
       configVersion?: unknown;
       files?: unknown;
@@ -696,7 +711,14 @@ export class StudyStore {
     if (JSON.stringify(expectedEntries) !== JSON.stringify(actualEntries)) {
       throw new Error("Backup integrity check failed: managed-file checksums do not match.");
     }
-    return { root: backupRoot, stateVersion, configVersion };
+    return {
+      root: backupRoot,
+      stateVersion,
+      configVersion,
+      ...(typeof manifest.createdAt === "string"
+        ? { createdAt: manifest.createdAt }
+        : {}),
+    };
   }
 
   private async backupChecksums(backupRoot: string): Promise<Record<string, string>> {
@@ -712,8 +734,7 @@ export class StudyStore {
     return Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b)));
   }
 
-  private async restoreManagedFiles(backupRelativePath: string): Promise<void> {
-    const backup = await this.validateBackup(backupRelativePath);
+  private async restoreManagedFiles(backup: ValidatedBackup): Promise<void> {
     const stateText = await readFile(path.join(backup.root, "state.json"), "utf8");
     const configText = await readFile(path.join(backup.root, "config.json"), "utf8");
     const stagedWiki = path.join(

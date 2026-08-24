@@ -56,12 +56,7 @@ export class RepairService {
     if (dryRun) return this.preview(mode);
 
     let update: VaultUpdateResult | undefined;
-    let migrationPreview: VaultUpdateResult | undefined;
     try {
-      migrationPreview = await this.store.updateVault({
-        dryRun: true,
-        deferKnowledgeRefresh: true,
-      });
       update = await this.store.updateVault({ deferKnowledgeRefresh: true });
       const knowledge = await this.knowledge.repairKnowledge({ mode });
       const wikiHealth = await this.knowledge.lintWiki({ log: false });
@@ -75,8 +70,8 @@ export class RepairService {
       const skills = await syncMetisSkills(this.store);
       await this.store.appendLog("repair", "Metis vault repair", [
         `Metis version: ${METIS_VERSION}`,
-        `State schema: v${migrationPreview.stateVersion} → v${update.stateVersion}`,
-        `Config schema: v${migrationPreview.configVersion} → v${update.configVersion}`,
+        `State schema: v${update.previousStateVersion} → v${update.stateVersion}`,
+        `Config schema: v${update.previousConfigVersion} → v${update.configVersion}`,
         `Knowledge mode: ${mode}`,
         `Search indexes reused: ${knowledge.searchIndex.reused}`,
         `Search indexes rebuilt: ${knowledge.searchIndex.rebuilt}`,
@@ -93,7 +88,7 @@ export class RepairService {
         dryRun: false,
         repaired: true,
         backupRelativePath: update.backupRelativePath,
-        migration: migrationSummary(update, migrationPreview),
+        migration: migrationSummary(update),
         skills,
         knowledge,
         wikiHealth,
@@ -173,11 +168,10 @@ export class RepairService {
 
 function migrationSummary(
   update: VaultUpdateResult,
-  preview: VaultUpdateResult = update,
 ): VaultRepairResult["migration"] {
   return {
-    previousStateVersion: preview.stateVersion,
-    previousConfigVersion: preview.configVersion,
+    previousStateVersion: update.previousStateVersion,
+    previousConfigVersion: update.previousConfigVersion,
     stateVersion: update.dryRun
       ? update.targetStateVersion
       : update.stateVersion,
@@ -186,7 +180,7 @@ function migrationSummary(
       : update.configVersion,
     targetStateVersion: update.targetStateVersion,
     targetConfigVersion: update.targetConfigVersion,
-    required: preview.updateRequired,
+    required: update.updateWasRequired,
     actions: update.actions,
   };
 }

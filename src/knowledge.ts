@@ -192,11 +192,20 @@ export interface KnowledgeRepairResult {
   };
 }
 
-export type KnowledgeSearchScope = "all" | "sources" | "wiki";
-
 export interface SourceSearchOptions {
   sourceIds?: ReadonlySet<string>;
   maxTextCharacters?: number;
+}
+
+/** Concept lookup and source search bound to one loaded state snapshot. */
+export interface RetrievalSession {
+  lookupConcepts(query: string, limit?: number): ConceptCapsule[];
+  sourceIdsForConcepts(keys: string[]): Set<string>;
+  search(
+    query: string,
+    limit?: number,
+    options?: SourceSearchOptions,
+  ): Promise<SearchChunk[]>;
 }
 
 interface ConceptIndexEntry {
@@ -988,16 +997,42 @@ export class KnowledgeService {
     return page;
   }
 
+  /**
+   * Opens concept lookup and source search over a single state snapshot and one
+   * concept index, so multi-facet retrieval does not reload the vault per facet.
+   */
+  async openRetrieval(): Promise<RetrievalSession> {
+    const state = await this.store.readState();
+    const index = this.buildConceptIndex(state);
+    return {
+      lookupConcepts: (query, limit = CONTEXT_LIMITS.conceptMatches) =>
+        this.lookupConceptsIn(index, query, limit),
+      sourceIdsForConcepts: (keys) => sourceIdsForConceptsIn(state, keys),
+      search: (
+        query,
+        limit = CONTEXT_LIMITS.sourceResultsDefault,
+        options = {},
+      ) => this.searchSources(state, query, limit, options),
+    };
+  }
+
   async lookupConcepts(
     query: string,
     limit: number = CONTEXT_LIMITS.conceptMatches,
   ): Promise<ConceptCapsule[]> {
+    const index = this.buildConceptIndex(await this.store.readState());
+    return this.lookupConceptsIn(index, query, limit);
+  }
+
+  private lookupConceptsIn(
+    index: ConceptLookupIndex,
+    query: string,
+    limit: number,
+  ): ConceptCapsule[] {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) throw new Error("Concept lookup query cannot be empty.");
-    const state = await this.store.readState();
     const queryKey = normalizeLookupKey(normalizedQuery);
     const queryTokens = new Set(lookupTokens(normalizedQuery));
-    const index = this.buildConceptIndex(state);
     const directPrimary = index.primary.get(queryKey) ?? [];
     const directAliases = directPrimary.length === 0
       ? index.aliases.get(queryKey) ?? []
@@ -1053,48 +1088,27 @@ export class KnowledgeService {
   }
 
   async sourceIdsForConcepts(keys: string[]): Promise<Set<string>> {
-    const requested = new Set(keys);
-    const state = await this.store.readState();
-    return new Set([
-      ...state.wikiPages
-        .filter((page) => requested.has(page.slug))
-        .flatMap((page) => page.sourceIds),
-      ...state.concepts
-        .filter((concept) => requested.has(concept.id))
-        .flatMap((concept) => concept.sourceIds),
-    ]);
+    return sourceIdsForConceptsIn(await this.store.readState(), keys);
   }
 
   async search(
     query: string,
     limit: number = CONTEXT_LIMITS.sourceResultsDefault,
-    scope: KnowledgeSearchScope = "sources",
     options: SourceSearchOptions = {},
+  ): Promise<SearchChunk[]> {
+    return this.searchSources(await this.store.readState(), query, limit, options);
+  }
+
+  private async searchSources(
+    state: StudyState,
+    query: string,
+    limit: number,
+    options: SourceSearchOptions,
   ): Promise<SearchChunk[]> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) throw new Error("Search query cannot be empty.");
-    if (scope === "wiki") {
-      const concepts = await this.lookupConcepts(normalizedQuery, limit);
-      return concepts.map((concept, index) => ({
-        id: `concept:${concept.key}`,
-        documentId: concept.key,
-        title: concept.title,
-        kind: "wiki",
-        text: concept.summary,
-        lineStart: 1,
-        lineEnd: 1,
-        score: concept.match === "exact"
-          ? 100
-          : concept.match === "alias"
-            ? 80
-            : Math.max(1, 50 - index),
-        sourceIds: concept.sourceIds,
-        uri: `study://wiki/${concept.key}`,
-      }));
-    }
     const queryTokens = tokenize(normalizedQuery);
     if (queryTokens.length === 0) return [];
-    const state = await this.store.readState();
     const sourceIds = options.sourceIds;
     const scopedSources = state.sources
       .filter((source) => !sourceIds || sourceIds.has(source.id));
@@ -1813,7 +1827,6 @@ export class KnowledgeService {
       ...state.wikiPages.map((page) => page.slug),
       ...state.concepts.map((concept) => concept.id),
     ]);
-    const now = Date.now();
     const entries = keys.map((key) => {
       const page = pagesBySlug.get(key);
       const concept = conceptsById.get(key);
@@ -2221,6 +2234,21 @@ function ingestionFailure(error: unknown): unknown {
     error instanceof Error ? error.message : String(error),
     { cause: error },
   );
+}
+
+function sourceIdsForConceptsIn(
+  state: StudyState,
+  keys: string[],
+): Set<string> {
+  const requested = new Set(keys);
+  return new Set([
+    ...state.wikiPages
+      .filter((page) => requested.has(page.slug))
+      .flatMap((page) => page.sourceIds),
+    ...state.concepts
+      .filter((concept) => requested.has(concept.id))
+      .flatMap((concept) => concept.sourceIds),
+  ]);
 }
 
 export function compactConceptCapsule(

@@ -1,11 +1,14 @@
 import {
   CURRENT_CONFIG_SCHEMA_VERSION,
   CURRENT_STATE_SCHEMA_VERSION,
+  groundingModeSchema,
   parseStudyConfig,
   parseStudyState,
   schemaVersionOf,
+  type ExtractionMethod,
+  type StudyConfig,
+  type StudyState,
 } from "./schema.js";
-import type { StudyConfig, StudyState } from "./types.js";
 import { nowIso, sha256 } from "./util.js";
 
 type JsonObject = Record<string, unknown>;
@@ -103,7 +106,7 @@ const CONFIG_MIGRATIONS = new Map<number, Migration>([
     schemaVersion: 1,
     name: nonEmptyString(legacy.name) ?? "Study Vault",
     createdAt: nonEmptyString(legacy.createdAt) ?? nowIso(),
-    groundingDefault: isGroundingMode(legacy.groundingDefault)
+    groundingDefault: groundingModeSchema.safeParse(legacy.groundingDefault).success
       ? legacy.groundingDefault
       : "sources_first",
   })],
@@ -171,7 +174,7 @@ function migrate<T>(
  * Sources predating schema v5 have no recorded extraction method; it is fully
  * determined by the source kind, because vision extraction did not yet exist.
  */
-function legacyExtractionMethod(kind: unknown): string {
+function legacyExtractionMethod(kind: unknown): ExtractionMethod {
   if (kind === "pdf") return "pdftotext";
   if (kind === "markdown") return "markdown";
   if (kind === "latex") return "latex";
@@ -190,8 +193,4 @@ function positiveInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value > 0
     ? value
     : undefined;
-}
-
-function isGroundingMode(value: unknown): value is StudyConfig["groundingDefault"] {
-  return value === "sources_only" || value === "sources_first" || value === "open";
 }

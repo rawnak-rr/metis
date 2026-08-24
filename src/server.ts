@@ -13,12 +13,11 @@ import { SUPPORTED_SOURCE_EXTENSIONS } from "./extract.js";
 import { GroundingService } from "./grounding.js";
 import { GROUNDING_POLICY } from "./policy.js";
 import { RepairService } from "./repair.js";
+import { groundingModeSchema, type GroundingMode } from "./schema.js";
 import { StudyStore } from "./store.js";
-import type { GroundingMode } from "./types.js";
 import type { VisionTranscriber } from "./vision.js";
 import { METIS_VERSION } from "./version.js";
 
-const groundingSchema = z.enum(["sources_only", "sources_first", "open"]);
 const searchScopeSchema = z.enum(["all", "sources", "wiki"]);
 const RESOURCE_LOG_TAIL_CHARACTERS = 3_000;
 
@@ -206,7 +205,7 @@ function registerPrompts(server: McpServer): void {
       description: "Grounded explanation built only from verified vault evidence.",
       argsSchema: {
         topic: z.string().describe("Topic or question to explain"),
-        grounding: groundingSchema.optional().describe("Evidence policy; sources_first is the normal choice"),
+        grounding: groundingModeSchema.optional().describe("Evidence policy; sources_first is the normal choice"),
       },
     },
     async ({ topic, grounding }) => ({
@@ -240,7 +239,7 @@ function registerTools(
       description: "Set the vault name or grounding default.",
       inputSchema: {
         name: z.string().min(1).optional(),
-        groundingDefault: groundingSchema.optional(),
+        groundingDefault: groundingModeSchema.optional(),
       },
       annotations: writeAnnotations(true),
     },
@@ -433,7 +432,7 @@ function registerTools(
         : await knowledge.lookupConcepts(query, resolvedLimit);
       const hits = scope === "wiki"
         ? []
-        : await knowledge.search(query, resolvedLimit, "sources");
+        : await knowledge.search(query, resolvedLimit);
       return jsonResult({
         ...(concepts.length > 0
           ? { concepts: concepts.map(compactConceptCapsule) }
@@ -453,7 +452,7 @@ function registerTools(
         facets: z.array(z.string().min(1).max(300)).min(1).max(5).optional().describe(
           "Optional self-contained atomic parts of a multi-part question. Metis derives conservative facets when omitted.",
         ),
-        groundingMode: groundingSchema.optional(),
+        groundingMode: groundingModeSchema.optional(),
         evidenceLimit: z.number().int().min(1).max(6).default(3),
         priorPacketId: z.string().min(1).max(200).optional().describe(
           "Packet ID from an immediately preceding answer in the same model context; matching citations are returned by reference instead of duplicated.",

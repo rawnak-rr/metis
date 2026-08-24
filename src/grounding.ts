@@ -9,6 +9,7 @@ import {
   KnowledgeService,
   compactConceptCapsule,
   tokenize,
+  type RetrievalSession,
 } from "./knowledge.js";
 import { StudyStore } from "./store.js";
 import { newId, unique } from "./util.js";
@@ -103,18 +104,17 @@ export class GroundingService {
       1,
       Math.min(MAX_ANSWER_EVIDENCE, Math.round(limit)),
     );
-    const concepts = await this.knowledge.lookupConcepts(question, 2);
+    const retrieval = await this.knowledge.openRetrieval();
+    const concepts = retrieval.lookupConcepts(question, 2);
     const answerFacets = buildAnswerFacets(question, requestedFacets);
     const facetRetrievals: FacetRetrieval[] = [];
     for (const facet of answerFacets) {
-      const facetConcepts = await this.knowledge.lookupConcepts(
-        facet.retrievalQuery,
-        2,
-      );
+      const facetConcepts = retrieval.lookupConcepts(facet.retrievalQuery, 2);
       const routedConcepts = mergeConceptCapsules(facetConcepts, concepts);
       facetRetrievals.push({
         facet,
         hits: await this.routedEvidence(
+          retrieval,
           facet.retrievalQuery,
           routedConcepts,
           Math.max(2, evidenceLimit),
@@ -193,19 +193,20 @@ export class GroundingService {
   }
 
   private async routedEvidence(
+    retrieval: RetrievalSession,
     query: string,
     concepts: ConceptCapsule[],
     limit: number,
   ): Promise<SearchChunk[]> {
-    const sourceIds = await this.knowledge
+    const sourceIds = retrieval
       .sourceIdsForConcepts(concepts.map((concept) => concept.key));
     const routed = sourceIds.size > 0
-      ? await this.knowledge.search(query, limit, "sources", { sourceIds })
+      ? await retrieval.search(query, limit, { sourceIds })
       : [];
     if (routed.filter((hit) => hit.score >= 2).length >= Math.min(2, limit)) {
       return routed;
     }
-    const broader = await this.knowledge.search(query, limit, "sources");
+    const broader = await retrieval.search(query, limit);
     const merged = new Map<string, SearchChunk>();
     for (const hit of [...routed, ...broader]) {
       const key = `${hit.documentId}:${hit.lineStart}:${hit.lineEnd}`;
