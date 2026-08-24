@@ -24,13 +24,19 @@ import {
 } from "./util.js";
 import {
   IncrementalBm25Index,
-  isStopWord,
   rehydrateChunkText,
   supportFingerprint,
   tokenize,
-  tokenizeRaw,
   type RankedIndexedChunk,
 } from "./retrieval.js";
+import {
+  WIKI_CITATION_PATTERN,
+  assessClaim,
+  lexicalSupportTokens,
+  splitClaimUnits,
+  stripCitationAndMarkdownSyntax,
+  type ClaimAssessment,
+} from "./claims.js";
 import { MetisError, errorPayload, type MetisErrorPayload } from "./errors.js";
 import {
   SUPPORTED_SOURCE_EXTENSIONS,
@@ -45,11 +51,11 @@ import {
 import { defaultVisionTranscriber, type VisionTranscriber } from "./vision.js";
 
 export { tokenize } from "./retrieval.js";
+export { lexicalSupportTokens, stemSupport } from "./claims.js";
 
 const DERIVED_TEXT_FORMAT_VERSION = 1 as const;
 const DERIVED_TEXT_CACHE_DIRECTORY = ".metis/cache/text-v1";
 const SEARCH_INDEX_CACHE_DIRECTORY = ".metis/cache/search-v1";
-const WIKI_CITATION_PATTERN = /\[([A-Za-z0-9_-]+)#L(\d+)-L(\d+)\]/g;
 const MAX_CITATION_LINES = 80;
 /** Ceiling on one batch, so a mistaken vault-wide scan fails fast and loudly. */
 const MAX_BATCH_SOURCES = 200;
@@ -72,10 +78,6 @@ export const CONTEXT_LIMITS = {
   batchSuggestedConcepts: 12,
   batchLogDetailLines: 20,
 } as const;
-const GENERIC_SUPPORT_WORDS = new Set([
-  "claim", "concept", "evidence", "fact", "information", "note", "page", "source",
-]);
-
 export interface IngestInput {
   title: string;
   content?: string;
@@ -146,6 +148,7 @@ export interface WikiLintResult {
       | "orphan_page"
       | "uncited_page"
       | "invalid_citation"
+      | "unsupported_claim"
       | "source_integrity"
       | "stale_page";
     page: string;
@@ -209,6 +212,13 @@ interface ConceptLookupIndex {
   entries: ConceptIndexEntry[];
   primary: Map<string, ConceptIndexEntry[]>;
   aliases: Map<string, ConceptIndexEntry[]>;
+}
+
+type WikiValidationLevel = "structural" | "strict";
+
+interface WikiValidationContext {
+  body: string;
+  excerptsByToken: ReadonlyMap<string, string>;
 }
 
 export interface RetrievalDiagnostics {
@@ -334,7 +344,12 @@ export class KnowledgeService {
       let valid = false;
       try {
         markdown = await this.store.readText(pageRelativePath);
-        await this.validateWikiMarkdown(markdown, page.sourceIds, state.sources);
+        await this.validateWikiMarkdown(
+          markdown,
+          page.sourceIds,
+          state.sources,
+          "structural",
+        );
         valid = true;
       } catch {
         valid = false;
@@ -929,7 +944,12 @@ export class KnowledgeService {
     if (!page.title || !page.summary || !input.markdown.trim()) {
       throw new Error("Wiki title, summary, and markdown body are required.");
     }
-    await this.validateWikiMarkdown(input.markdown, sourceIds, state.sources);
+    await this.validateWikiMarkdown(
+      input.markdown,
+      sourceIds,
+      state.sources,
+      "strict",
+    );
 
     await this.store.mutateManaged(
       (next) => {
@@ -1429,7 +1449,12 @@ export class KnowledgeService {
       );
     }
     const markdown = blocks.join("\n").trimEnd();
-    await this.validateWikiMarkdown(markdown, page.sourceIds, sources);
+    await this.validateWikiMarkdown(
+      markdown,
+      page.sourceIds,
+      sources,
+      "structural",
+    );
     return { markdown: `${markdown}\n`, summary };
   }
 
@@ -1701,7 +1726,35 @@ export class KnowledgeService {
           const markdown = await this.store.readText(
             path.posix.join("wiki", "concepts", `${page.slug}.md`),
           );
-          await this.validateWikiMarkdown(markdown, page.sourceIds, state.sources);
+          const validation = await this.validateWikiMarkdown(
+            markdown,
+            page.sourceIds,
+            state.sources,
+            "structural",
+          );
+          try {
+            this.validateWikiLexicalBlocks(validation);
+          } catch (error) {
+            issues.push({
+              severity: "error",
+              code: "invalid_citation",
+              page: page.slug,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+          for (const assessment of this.assessWikiClaims(validation)) {
+            if (assessment.status !== "unsupported" || assessment.kind !== "checkable") {
+              continue;
+            }
+            const unmatched = assessment.unmatched.slice(0, 8).join(", ");
+            const more = assessment.unmatched.length > 8 ? ", ..." : "";
+            issues.push({
+              severity: "info",
+              code: "unsupported_claim",
+              page: page.slug,
+              message: `The cited passage does not lexically support this wiki claim (${assessment.matched}/${assessment.required} required distinctive terms matched; unmatched: ${unmatched}${more}): "${assessment.claim.text.slice(0, 120)}"`,
+            });
+          }
         } catch (error) {
           issues.push({
             severity: "error",
@@ -1853,7 +1906,8 @@ export class KnowledgeService {
     markdown: string,
     declaredSourceIds: string[],
     sources: SourceRecord[],
-  ): Promise<void> {
+    level: WikiValidationLevel,
+  ): Promise<WikiValidationContext> {
     const body = stripFrontmatter(markdown);
     const citations = parseWikiCitations(body);
     if (citations.length === 0) {
@@ -1916,8 +1970,21 @@ export class KnowledgeService {
           `Every factual prose block needs an inline source citation. Uncited block: "${claim.slice(0, 120)}"`,
         );
       }
+    }
+
+    const validation = { body, excerptsByToken };
+    if (level === "strict") this.validateWikiLexicalBlocks(validation);
+    return validation;
+  }
+
+  private validateWikiLexicalBlocks(validation: WikiValidationContext): void {
+    for (const block of wikiClaimBlocks(validation.body)) {
+      const blockCitations = parseWikiCitations(block);
+      const claim = stripCitationAndMarkdownSyntax(block);
+      const claimTokens = lexicalSupportTokens(claim);
+      if (claimTokens.length === 0) continue;
       const evidence = blockCitations
-        .map((citation) => excerptsByToken.get(citation.token) ?? "")
+        .map((citation) => validation.excerptsByToken.get(citation.token) ?? "")
         .join("\n");
       const evidenceTokens = new Set(lexicalSupportTokens(evidence));
       const overlap = claimTokens.filter((token) => evidenceTokens.has(token)).length;
@@ -1931,6 +1998,18 @@ export class KnowledgeService {
         );
       }
     }
+  }
+
+  private assessWikiClaims(validation: WikiValidationContext): ClaimAssessment[] {
+    return wikiClaimBlocks(validation.body).flatMap((block) => {
+      const evidence = parseWikiCitations(block)
+        .map((citation) => validation.excerptsByToken.get(citation.token) ?? "")
+        .join("\n");
+      const evidenceTokens = new Set(lexicalSupportTokens(evidence));
+      return splitClaimUnits(block)
+        .filter((unit) => lexicalSupportTokens(unit.text).length > 0)
+        .map((unit) => assessClaim(unit, evidenceTokens));
+    });
   }
 
   private preview(text: string): string {
@@ -2202,51 +2281,6 @@ function wikiClaimBlocks(markdown: string): string[] {
       if (/^(?:evidence|related|see also|sources?)\s*:/i.test(block)) return false;
       return true;
     });
-}
-
-function stripCitationAndMarkdownSyntax(markdown: string): string {
-  return markdown
-    .replace(WIKI_CITATION_PATTERN, " ")
-    .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
-    .replace(/\[([^\]]+)]\([^)]*\)/g, "$1")
-    .replace(/\[\[([^\]|]+)(?:\|[^\]]+)?]]/g, "$1")
-    .replace(/[`*_>#|~-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-export function lexicalSupportTokens(text: string): string[] {
-  return unique(tokenizeRaw(text)
-    .filter((word) => !isStopWord(word) && !GENERIC_SUPPORT_WORDS.has(word))
-    .map(stemSupport)
-    .filter((token) => token.length > 1));
-}
-
-/**
- * Aggressive stemming for the citation-support gate, which asks whether a
- * claim and its cited excerpt talk about the same things. Inflected forms
- * should collide here even at some cost in precision, so plurals are removed
- * before verb endings ("ratings" -> "rating" -> "rat") and a trailing silent
- * "e" goes last so "hedge", "hedged", "hedges", and "hedging" all agree.
- */
-export function stemSupport(token: string): string {
-  let stem = token;
-  if (stem.length > 4 && stem.endsWith("es")) stem = stem.slice(0, -2);
-  else if (
-    stem.length > 3
-    && stem.endsWith("s")
-    // A doubled or vowel-preceded "s" usually belongs to the stem itself
-    // ("class", "increas"); stripping it would break idempotence.
-    && !/(?:ss|[aeiou]s)$/.test(stem)
-  ) {
-    stem = stem.slice(0, -1);
-  }
-  if (stem.length > 7 && stem.endsWith("ingly")) stem = stem.slice(0, -5);
-  else if (stem.length > 6 && stem.endsWith("edly")) stem = stem.slice(0, -4);
-  else if (stem.length > 5 && stem.endsWith("ing")) stem = stem.slice(0, -3);
-  else if (stem.length > 4 && stem.endsWith("ed")) stem = stem.slice(0, -2);
-  else if (stem.length > 4 && stem.endsWith("ly")) stem = stem.slice(0, -2);
-  return stem.length > 3 && stem.endsWith("e") ? stem.slice(0, -1) : stem;
 }
 
 function reconcileKnowledgeRelationships(state: StudyState): {
