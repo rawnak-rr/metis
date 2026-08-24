@@ -11,6 +11,12 @@ import {
   tokenize,
   type RetrievalSession,
 } from "./knowledge.js";
+import {
+  MAX_JUDGED_PASSAGES,
+  type EntailmentJudge,
+  type EntailmentRequest,
+  type EntailmentVerdicts,
+} from "./entailment.js";
 import { StudyStore } from "./store.js";
 import { newId, unique } from "./util.js";
 
@@ -19,6 +25,7 @@ const MAX_ANSWER_FACETS = 5;
 const MAX_ANSWER_EVIDENCE = 6;
 const SUPPORTED_UNION_TOKEN_COVERAGE = 0.7;
 const SUPPORTED_PASSAGE_TOKEN_COVERAGE = 0.5;
+const MAX_BORDERLINE_EVIDENCE = 2;
 
 const FACET_INSTRUCTION_TOKENS = new Set([
   "answer",
@@ -46,6 +53,25 @@ export interface EvidenceFacetCoverage {
   question: string;
   status: EvidenceFacetStatus;
   citations: string[];
+  /**
+   * Set when an entailment verdict decided this status instead of token
+   * coverage. Omitted for a lexical status, which is the default.
+   */
+  statusMethod?: "entailment";
+  /**
+   * Packet citations that did not support this facet, whichever method
+   * judged it. Omitted when empty.
+   */
+  borderlineCitations?: string[];
+}
+
+export interface PacketEvidenceExcerpt extends EvidenceExcerpt {
+  /**
+   * Set when no facet's lexical check confirmed this excerpt. It is present
+   * because retrieval ranked it highly for a facet, and the connected model
+   * decides whether it supports the answer.
+   */
+  lexicalSupport?: "related";
 }
 
 export interface EvidencePacket {
@@ -54,7 +80,7 @@ export interface EvidencePacket {
   coverage: "sufficient" | "partial" | "none";
   facets: EvidenceFacetCoverage[];
   concepts: CompactConceptCapsule[];
-  evidence: EvidenceExcerpt[];
+  evidence: PacketEvidenceExcerpt[];
   warnings: Array<
     | "compare_independent_sources"
     | "possible_numeric_conflict"
@@ -69,7 +95,7 @@ export interface EvidencePacket {
 
 interface CachedEvidencePacket {
   groundingMode: GroundingMode;
-  evidence: EvidenceExcerpt[];
+  evidence: PacketEvidenceExcerpt[];
 }
 
 interface AnswerFacet {
@@ -79,17 +105,41 @@ interface AnswerFacet {
   explicit: boolean;
 }
 
+type FacetHitTier = "qualifying" | "related" | "unrelated";
+
+interface ScoredFacetHit {
+  hit: SearchChunk;
+  matchedTokens: string[];
+  tokenCoverage: number;
+  tier: FacetHitTier;
+}
+
 interface FacetRetrieval {
   facet: AnswerFacet;
+  scored: ScoredFacetHit[];
+}
+
+interface FacetEvidenceSelection {
   hits: SearchChunk[];
+  borderlineCitations: Set<string>;
 }
 export class GroundingService {
   private readonly answerPackets = new Map<string, CachedEvidencePacket>();
+  private entailment?: EntailmentJudge;
 
   constructor(
     private readonly store: StudyStore,
     private readonly knowledge: KnowledgeService,
   ) {}
+
+  /**
+   * Wired after the MCP server exists, because a sampling-backed judge
+   * depends on the client that connects to it. Grounding stays lexical until
+   * then and whenever the judge returns no verdict.
+   */
+  useEntailmentJudge(judge: EntailmentJudge): void {
+    this.entailment = judge;
+  }
 
   async prepareAnswer(
     question: string,
@@ -113,23 +163,34 @@ export class GroundingService {
       const routedConcepts = mergeConceptCapsules(facetConcepts, concepts);
       facetRetrievals.push({
         facet,
-        hits: await this.routedEvidence(
-          retrieval,
-          facet.retrievalQuery,
-          routedConcepts,
-          Math.max(2, evidenceLimit),
+        scored: scoreFacetHits(
+          facet,
+          await this.routedEvidence(
+            retrieval,
+            facet.retrievalQuery,
+            routedConcepts,
+            Math.max(2, evidenceLimit),
+          ),
         ),
       });
     }
-    const hits = selectFacetEvidence(facetRetrievals, evidenceLimit);
-    const selectedHitKeys = new Set(hits.map(searchHitKey));
-    const facets = facetRetrievals.map(({ facet, hits: candidates }) =>
+    const selection = selectFacetEvidence(facetRetrievals, evidenceLimit);
+    const selectedHitKeys = new Set(selection.hits.map(searchHitKey));
+    const lexicalFacets = facetRetrievals.map(({ facet, scored }) =>
       assessEvidenceFacet(
         facet,
-        candidates.filter((hit) => selectedHitKeys.has(searchHitKey(hit))),
+        scored.filter((item) => selectedHitKeys.has(searchHitKey(item.hit))),
       ));
+    const facets = applyEntailmentVerdicts(
+      lexicalFacets,
+      await this.judgeFacets(facetRetrievals, lexicalFacets, selectedHitKeys),
+    );
     const coverage = aggregateFacetCoverage(facets);
-    const completeEvidence = this.knowledge.evidenceExcerpts(hits);
+    const completeEvidence: PacketEvidenceExcerpt[] = this.knowledge
+      .evidenceExcerpts(selection.hits)
+      .map((item) => selection.borderlineCitations.has(item.citation)
+        ? { ...item, lexicalSupport: "related" as const }
+        : item);
     const priorPacket = priorPacketId
       ? this.answerPackets.get(priorPacketId)
       : undefined;
@@ -176,6 +237,45 @@ export class GroundingService {
         ? { reuseUnavailable: true }
         : {}),
     };
+  }
+
+  /**
+   * Ask the connected model whether each packet passage answers its facet.
+   * Only passages already in the packet are judged, so a verdict never widens
+   * what the caller sees, and a facet decided by a mechanical numeric conflict
+   * is left alone.
+   */
+  private async judgeFacets(
+    retrievals: FacetRetrieval[],
+    facets: EvidenceFacetCoverage[],
+    selectedHitKeys: Set<string>,
+  ): Promise<EntailmentVerdicts[]> {
+    const judge = this.entailment;
+    if (!judge) return [];
+    const statusById = new Map(facets.map((facet) => [facet.id, facet.status]));
+    const requests: EntailmentRequest[] = retrievals
+      .filter((retrieval) =>
+        statusById.get(retrieval.facet.id) !== "conflicting")
+      .map((retrieval) => ({
+        facetId: retrieval.facet.id,
+        question: retrieval.facet.question,
+        passages: retrieval.scored
+          .filter((item) => item.hit.kind === "source"
+            && selectedHitKeys.has(searchHitKey(item.hit)))
+          .sort((a, b) => compareHits(a.hit, b.hit))
+          .slice(0, MAX_JUDGED_PASSAGES)
+          .map((item) => ({
+            citation: citationForHit(item.hit),
+            text: item.hit.text,
+          })),
+      }))
+      .filter((request) => request.passages.length > 0);
+    if (requests.length === 0) return [];
+    try {
+      return await judge.judge(requests);
+    } catch {
+      return [];
+    }
   }
 
   private rememberAnswerPacket(
@@ -297,7 +397,7 @@ function mergeConceptCapsules(
 function selectFacetEvidence(
   retrievals: FacetRetrieval[],
   limit: number,
-): SearchChunk[] {
+): FacetEvidenceSelection {
   const selected = new Map<string, SearchChunk>();
   const add = (hit: SearchChunk): void => {
     if (selected.size >= limit) return;
@@ -309,7 +409,7 @@ function selectFacetEvidence(
   // Preserve both sides of a detected disagreement before using the remaining
   // packet budget for ordinary relevance ranking.
   for (const retrieval of retrievals) {
-    const strongHits = qualifyingFacetHits(retrieval.facet, retrieval.hits);
+    const strongHits = tieredHits(retrieval, "qualifying");
     const conflictCitations = new Set(
       numericConflictGroups(evidenceFromHits(strongHits))
         .flatMap((conflict) => conflict.citations),
@@ -319,71 +419,151 @@ function selectFacetEvidence(
     }
   }
 
-  // Give each facet one directly qualifying passage. If none qualifies, keep
-  // at most one weaker related passage so partial support remains inspectable.
-  // Never fill the packet merely because unused evidence budget remains.
+  // Give each facet its best directly qualifying passage. If none qualifies,
+  // keep its best related passage so partial support remains inspectable.
   for (const retrieval of retrievals) {
-    const qualified = qualifyingFacetHits(retrieval.facet, retrieval.hits);
-    const first = qualified[0]
-      ?? relatedFacetHits(retrieval.facet, retrieval.hits)[0];
-    if (first) add(first);
+    const ranked = [...retrieval.scored]
+      .sort((a, b) => compareHits(a.hit, b.hit));
+    const first = ranked.find((item) => item.tier === "qualifying")
+      ?? ranked.find((item) => item.tier === "related");
+    if (first) add(first.hit);
   }
-  const ranked = retrievals
-    .flatMap((retrieval) =>
-      qualifyingFacetHits(retrieval.facet, retrieval.hits))
-    .sort((a, b) => b.score - a.score
-      || a.documentId.localeCompare(b.documentId)
-      || a.lineStart - b.lineStart);
-  for (const hit of ranked) add(hit);
-  return [...selected.values()].sort((a, b) => b.score - a.score
+  for (const hit of rankHits(retrievals.flatMap((retrieval) =>
+    tieredHits(retrieval, "qualifying")))) {
+    add(hit);
+  }
+
+  // Unused budget goes to the best-scoring passages token overlap could not
+  // confirm. Excluding them is unrecoverable downstream, since the connected
+  // model cannot weigh evidence it never sees, while a bounded number of extra
+  // excerpts only costs context.
+  let borderlineAdded = 0;
+  for (const hit of rankHits(borderlineCandidates(retrievals))) {
+    if (borderlineAdded >= MAX_BORDERLINE_EVIDENCE) break;
+    if (selected.size >= limit) break;
+    if (selected.has(searchHitKey(hit))) continue;
+    const before = selected.size;
+    add(hit);
+    if (selected.size > before) borderlineAdded += 1;
+  }
+
+  const confirmed = new Set(retrievals.flatMap((retrieval) =>
+    tieredHits(retrieval, "qualifying").map(citationForHit)));
+  const hits = rankHits([...selected.values()]);
+  return {
+    hits,
+    borderlineCitations: new Set(hits
+      .map(citationForHit)
+      .filter((citation) => !confirmed.has(citation))),
+  };
+}
+
+/**
+ * Passages eligible for unused packet budget: everything retrieval returned
+ * for a facet that the qualifying passes did not already take. Token overlap
+ * decides no part of visibility, because it cannot rank a paraphrase against a
+ * decoy that repeats the question's wording; retrieval has already ranked and
+ * truncated these candidates, and the packet cap bounds what a weak one costs.
+ */
+function borderlineCandidates(retrievals: FacetRetrieval[]): SearchChunk[] {
+  return retrievals.flatMap((retrieval) => retrieval.scored
+    .filter((item) => item.tier !== "qualifying")
+    .map((item) => item.hit));
+}
+
+function tieredHits(
+  retrieval: FacetRetrieval,
+  tier: FacetHitTier,
+): SearchChunk[] {
+  return retrieval.scored
+    .filter((item) => item.tier === tier)
+    .map((item) => item.hit);
+}
+
+function rankHits(hits: SearchChunk[]): SearchChunk[] {
+  return [...hits].sort(compareHits);
+}
+
+function compareHits(a: SearchChunk, b: SearchChunk): number {
+  return b.score - a.score
     || a.documentId.localeCompare(b.documentId)
-    || a.lineStart - b.lineStart);
+    || a.lineStart - b.lineStart;
+}
+
+/**
+ * Tier every retrieved passage against one facet once. Selection and status
+ * assessment both read these tiers, so the coverage thresholds are applied in
+ * a single place and each passage is tokenized once per facet.
+ */
+function scoreFacetHits(
+  facet: AnswerFacet,
+  hits: SearchChunk[],
+): ScoredFacetHit[] {
+  const queryTokens = facetSupportTokens(facet.question);
+  const minimumMatches = Math.min(2, queryTokens.length);
+  return hits.map((hit) => {
+    const evidenceTokens = new Set(tokenize(hit.text));
+    const matchedTokens = queryTokens.filter((token) =>
+      evidenceTokens.has(token));
+    const tokenCoverage = queryTokens.length > 0
+      ? matchedTokens.length / queryTokens.length
+      : 0;
+    const qualifying = minimumMatches > 0
+      && matchedTokens.length >= minimumMatches
+      && tokenCoverage >= SUPPORTED_PASSAGE_TOKEN_COVERAGE;
+    return {
+      hit,
+      matchedTokens,
+      tokenCoverage,
+      tier: qualifying
+        ? "qualifying"
+        : matchedTokens.length > 0
+          ? "related"
+          : "unrelated",
+    };
+  });
 }
 
 function assessEvidenceFacet(
   facet: AnswerFacet,
-  hits: SearchChunk[],
+  scored: ScoredFacetHit[],
 ): EvidenceFacetCoverage {
   const queryTokens = facetSupportTokens(facet.question);
-  const queryTokenSet = new Set(queryTokens);
-  const scored = hits.map((hit) => {
-    const evidenceTokens = new Set(tokenize(hit.text));
-    const matchedTokens = queryTokens.filter((token) =>
-      evidenceTokens.has(token));
-    return {
-      hit,
-      matchedTokens,
-      tokenCoverage: queryTokens.length > 0
-        ? matchedTokens.length / queryTokens.length
-        : 0,
-    };
-  });
-  const related = scored.filter((item) => item.matchedTokens.length > 0);
   const minimumMatches = Math.min(2, queryTokens.length);
-  const strong = related.filter((item) =>
-    item.matchedTokens.length >= minimumMatches
-    && item.tokenCoverage >= SUPPORTED_PASSAGE_TOKEN_COVERAGE);
+  const related = scored.filter((item) => item.tier !== "unrelated");
+  const strong = scored.filter((item) => item.tier === "qualifying");
   const citable = strong.length > 0 ? strong : related;
   const citations = unique(citable.map((item) => citationForHit(item.hit)));
+  const borderline = unique(scored
+    .filter((item) => item.tier === "related")
+    .map((item) => citationForHit(item.hit)));
+  const coverageOf = (
+    status: EvidenceFacetStatus,
+    statusCitations: string[],
+  ): EvidenceFacetCoverage => {
+    const unconfirmed = borderline
+      .filter((citation) => !statusCitations.includes(citation));
+    return {
+      id: facet.id,
+      question: facet.question,
+      status,
+      citations: statusCitations,
+      ...(unconfirmed.length > 0
+        ? { borderlineCitations: unconfirmed }
+        : {}),
+    };
+  };
+
   const conflicts = numericConflictGroups(
     evidenceFromHits(strong.map((item) => item.hit)),
   );
   if (conflicts.length > 0) {
-    return {
-      id: facet.id,
-      question: facet.question,
-      status: "conflicting",
-      citations: unique(conflicts.flatMap((conflict) => conflict.citations)),
-    };
+    return coverageOf(
+      "conflicting",
+      unique(conflicts.flatMap((conflict) => conflict.citations)),
+    );
   }
-  if (related.length === 0 || queryTokenSet.size === 0) {
-    return {
-      id: facet.id,
-      question: facet.question,
-      status: "unsupported",
-      citations: [],
-    };
-  }
+  if (related.length === 0) return coverageOf("unsupported", []);
 
   const unionMatches = new Set(strong.flatMap((item) => item.matchedTokens));
   const unionCoverage = queryTokens.length > 0
@@ -399,47 +579,53 @@ function assessEvidenceFacet(
     && unionMatches.size >= minimumMatches
     && unionCoverage >= SUPPORTED_UNION_TOKEN_COVERAGE
     && bestPassageCoverage >= SUPPORTED_PASSAGE_TOKEN_COVERAGE;
-  if (supported) {
+  return coverageOf(
+    supported ? "supported" : "partially_supported",
+    citations,
+  );
+}
+
+/**
+ * Replace a lexical status with an entailment verdict where one came back.
+ * Citations follow the verdict, so a passage that only repeats the question's
+ * wording drops to borderline instead of being cited as support.
+ */
+function applyEntailmentVerdicts(
+  facets: EvidenceFacetCoverage[],
+  judged: EntailmentVerdicts[],
+): EvidenceFacetCoverage[] {
+  if (judged.length === 0) return facets;
+  const byFacet = new Map(judged.map((item) => [item.facetId, item.verdicts]));
+  return facets.map((facet) => {
+    const verdicts = byFacet.get(facet.id);
+    if (!verdicts || verdicts.length === 0) return facet;
+    const judgedCitations = verdicts.map((item) => item.citation);
+    const supported = verdicts
+      .filter((item) => item.verdict === "supported")
+      .map((item) => item.citation);
+    const conflicting = verdicts
+      .filter((item) => item.verdict === "conflicting")
+      .map((item) => item.citation);
+    const citations = conflicting.length > 0
+      ? unique([...supported, ...conflicting])
+      : supported;
+    const borderline = unique([
+      ...(facet.borderlineCitations ?? [])
+        .filter((citation) => !judgedCitations.includes(citation)),
+      ...judgedCitations.filter((citation) => !citations.includes(citation)),
+    ]);
     return {
       id: facet.id,
       question: facet.question,
-      status: "supported",
+      status: conflicting.length > 0
+        ? "conflicting"
+        : supported.length > 0
+          ? "supported"
+          : "unsupported",
       citations,
+      statusMethod: "entailment",
+      ...(borderline.length > 0 ? { borderlineCitations: borderline } : {}),
     };
-  }
-  return {
-    id: facet.id,
-    question: facet.question,
-    status: "partially_supported",
-    citations,
-  };
-}
-
-function qualifyingFacetHits(
-  facet: AnswerFacet,
-  hits: SearchChunk[],
-): SearchChunk[] {
-  const queryTokens = facetSupportTokens(facet.question);
-  const minimumMatches = Math.min(2, queryTokens.length);
-  if (minimumMatches === 0) return [];
-  return hits.filter((hit) => {
-    const evidenceTokens = new Set(tokenize(hit.text));
-    const matched = queryTokens.filter((token) =>
-      evidenceTokens.has(token)).length;
-    return matched >= minimumMatches
-      && matched / queryTokens.length >= SUPPORTED_PASSAGE_TOKEN_COVERAGE;
-  });
-}
-
-function relatedFacetHits(
-  facet: AnswerFacet,
-  hits: SearchChunk[],
-): SearchChunk[] {
-  const queryTokens = facetSupportTokens(facet.question);
-  if (queryTokens.length === 0) return [];
-  return hits.filter((hit) => {
-    const evidenceTokens = new Set(tokenize(hit.text));
-    return queryTokens.some((token) => evidenceTokens.has(token));
   });
 }
 

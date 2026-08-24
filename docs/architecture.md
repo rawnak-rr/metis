@@ -24,6 +24,10 @@ Answer packets contain only the current keyed concepts, minimum raw excerpts, an
 
 Grounded answers decompose obvious multi-clause questions into at most five facets, while callers may provide more accurate self-contained facets explicitly. Retrieval runs per facet and the bounded packet maps each facet to raw citations with a `supported`, `partially_supported`, `unsupported`, or `conflicting` status. Overall coverage is sufficient only when every facet is supported. The server contract identifies these as conservative lexical routing signals rather than semantic entailment; raw evidence remains available to the connected model for final judgment.
 
+Token coverage must not decide what the model gets to see, because it cannot rank a passage that answers a facet in different words against one that merely repeats the question's wording. Visibility therefore follows retrieval alone: unused packet budget goes to a bounded number of passages the coverage check could not confirm rather than being left unspent, marked `lexicalSupport: "related"` in the evidence list and listed under the facet's `borderlineCitations`. Withholding relevant evidence cannot be recovered downstream, while an extra excerpt only costs context.
+
+Coverage is also not the last word on status. When the connected client advertises sampling, each facet's packet passages are sent to that client's model for a support verdict, and the returned status and citations replace the lexical ones and carry `statusMethod: "entailment"`. Only passages already in the packet are judged, so a verdict never widens what the caller sees; a facet already decided by a mechanical numeric conflict is left alone; and a client without sampling, a refused or timed out request, or an unparseable reply falls back to the lexical status rather than failing the answer. Passage text reaches that model as untrusted data, and the prompt says so.
+
 Learner state is deliberately absent. Concept records carry identity, notes, and source references only. Mastery, scheduling, and misconception tracking belong to tools built on top of the kernel, which own their own state.
 
 ## Model boundary
@@ -32,7 +36,8 @@ The MCP server does not require a provider API key. It uses the model already co
 
 - tools retrieve evidence and persist actions;
 - resources expose bounded dashboard, wiki, log, source, and maintenance views;
-- prompts teach the host model the desired grounding workflow.
+- prompts teach the host model the desired grounding workflow;
+- sampling asks that model for a facet support verdict when the client advertises the capability.
 
 This keeps deployment portable across clients and avoids coupling vault data to one model vendor. JSON tools emit one compact text payload rather than duplicating the object in both MCP content channels.
 
@@ -52,11 +57,10 @@ Every raw source is checksum-verified before repair. A missing or modified sourc
 
 The stable vault format allows later additions without migration of user-authored Markdown:
 
-- hybrid embeddings and reranking;
-- entailment-based facet status and citation gating;
+- hybrid embeddings and reranking, the only fix for a paraphrase lexical retrieval never returns at all;
+- entailment-based wiki citation gating, reusing the grounding sampling seam;
 - structure-aware chunking and richer document parsers;
 - independently checksummed extracted text for non-plaintext sources;
 - graph visualization and prerequisite inference;
 - HTTP transport, user accounts, and shared vaults;
-- optional model sampling when the MCP client advertises that capability;
 - higher-level consumers (research, testing, scheduling) that keep their own state beside the kernel's.
