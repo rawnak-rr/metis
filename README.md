@@ -66,7 +66,7 @@ With an MCP client, reconnect to the latest build and tell the connected LLM:
 
 > Metis repair
 
-The server instruction maps that request to `metis_repair`. The command and MCP tool use the same workflow: refuse newer-schema downgrades, create a checksummed timestamped backup under `.metis/backups/`, run every migration in order, reconcile safe state references, repair generated source pages and concept frontmatter, remove untracked files from the Metis-managed `wiki/concepts/` and `wiki/sources/` directories, rebuild invalid concept pages as citation-valid verbatim evidence stubs, refresh the portable Agent Skills bundle, and return bounded wiki health. Valid model-authored synthesis is preserved, and removed managed files remain recoverable from the backup.
+The server instruction maps that request to `metis_repair`. The command and MCP tool use the same workflow: refuse newer-schema downgrades, create a checksummed timestamped backup under `.metis/backups/`, run every migration in order, reconcile safe state references, repair generated source pages and concept frontmatter, remove untracked files from the Metis-managed `wiki/concepts/` and `wiki/sources/` directories, rebuild mechanically invalid concept pages as citation-valid verbatim evidence stubs, refresh the portable Agent Skills bundle, and return bounded wiki health. Lexical mismatch alone does not trigger a rebuild. Valid model-authored synthesis is preserved, and removed managed files remain recoverable from the backup.
 
 Raw sources are checksum-verified, restored to read-only permissions when necessary, and never rewritten. A missing or modified raw source stops repair and rolls managed state and wiki files back instead of inventing evidence. Failed repairs retain a direct backup path.
 
@@ -197,7 +197,7 @@ Every grounded-answer packet includes a short `packetId`. For an immediate relat
 
 `search_knowledge` defaults to server-side keyed wiki routing and normally returns one bounded capsule. Use `scope: "sources"` for raw excerpts or `scope: "all"` when both are explicitly useful. Normal wiki and source resources return compact capsules or provenance descriptors; complete generated wiki Markdown is available only through `study://maintenance/wiki/{slug}`. Wiki synthesis is never authoritative evidence for `prepare_grounded_answer`.
 
-On wiki writes, Metis verifies that citation source IDs and line ranges exist, requires inline citation coverage for factual prose, and requires at least half of each block's distinctive terms to occur in its cited excerpts. This mechanical check catches missing, out-of-range, and unrelated citations; it is not a substitute for semantic or human review.
+On wiki writes, Metis verifies that citation source IDs and line ranges exist, requires inline citation coverage for factual prose, and requires at least half of each block's distinctive terms to occur in its cited excerpts. `lint_wiki` additionally reports unsupported sentence-sized claims as info findings. The sentence check is read-only while its threshold is calibrated. These mechanical checks catch missing, out-of-range, and unrelated citations; they are not substitutes for semantic or human review.
 
 For long sessions, dashboards expose bounded summaries plus totals, and graph and lint results paginate or truncate explicitly. A fresh client can route to the right concept and reload verified evidence without replaying the transcript.
 

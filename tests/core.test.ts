@@ -429,6 +429,119 @@ describe("knowledge and grounding", () => {
     })).resolves.toEqual(expect.objectContaining({ slug: "respiration" }));
   });
 
+  it("reports sentence-level fabrication without rejecting the pooled block", async () => {
+    const { knowledge } = await fixture();
+    const ingested = await knowledge.ingest({
+      title: "Adam Notes",
+      content: "Adam optimizer computes adaptive learning rates for each parameter from first and second moment estimates.",
+    });
+    const sourceId = ingested.source.id;
+
+    await expect(knowledge.upsertWikiPage({
+      title: "Adam",
+      summary: "Adaptive optimizer notes.",
+      markdown: [
+        "# Adam",
+        "",
+        `Adam optimizer computes adaptive learning rates for each parameter. It was shown to outperform every method in 2019. [${sourceId}#L1-L1]`,
+      ].join("\n"),
+      sourceIds: [sourceId],
+    })).resolves.toEqual(expect.objectContaining({ slug: "adam" }));
+
+    const lint = await knowledge.lintWiki({ log: false });
+    expect(lint.healthy).toBe(true);
+    expect(lint.issues).toContainEqual(expect.objectContaining({
+      severity: "info",
+      code: "unsupported_claim",
+      page: "adam",
+      message: expect.stringMatching(/0\/3.*2019.*outperform every method/i),
+    }));
+  });
+
+  it("does not report supported or connective sentences", async () => {
+    const { knowledge } = await fixture();
+    const ingested = await knowledge.ingest({
+      title: "Adam Notes",
+      content: "Adam optimizer computes adaptive learning rates for each parameter from first and second moment estimates.",
+    });
+    const sourceId = ingested.source.id;
+    const connectives = [
+      "This distinction has two practical consequences.",
+      "In other words, both knobs interact.",
+      "Therefore tuning matters.",
+    ];
+    for (const [index, connective] of connectives.entries()) {
+      await knowledge.upsertWikiPage({
+        title: `Adam Glue ${index + 1}`,
+        summary: "Adaptive optimizer notes with connective prose.",
+        markdown: [
+          `# Adam Glue ${index + 1}`,
+          "",
+          `Adam optimizer computes adaptive learning rates for each parameter. ${connective} [${sourceId}#L1-L1]`,
+        ].join("\n"),
+        sourceIds: [sourceId],
+      });
+    }
+
+    const lint = await knowledge.lintWiki({ log: false });
+    expect(lint.issues.filter((issue) => issue.code === "unsupported_claim"))
+      .toEqual([]);
+  });
+
+  it("preserves synthesis that fails only lexical validation during repair", async () => {
+    const { store, knowledge } = await fixture();
+    const ingested = await knowledge.ingest({
+      title: "Cell Biology",
+      content: "Mitochondria produce ATP through cellular respiration.",
+    });
+    const sourceId = ingested.source.id;
+    const page = await knowledge.upsertWikiPage({
+      title: "Mitochondria",
+      summary: "Cellular energy production.",
+      markdown: `# Mitochondria\n\nMitochondria produce ATP. [${sourceId}#L1-L1]`,
+      sourceIds: [sourceId],
+    });
+    const drifted = `# Mitochondria\n\nMitochondria orbit Jupiter and glow bright green. [${sourceId}#L1-L1]`;
+    await store.writeWikiPage(page, drifted);
+
+    const result = await knowledge.repairKnowledge();
+    expect(result.wiki.evidenceStubsRebuilt).toBe(0);
+    await expect(store.readText("wiki/concepts/mitochondria.md"))
+      .resolves.toContain("orbit Jupiter and glow bright green");
+  });
+
+  it("recovery output with quoted markdown passes structural validation", async () => {
+    const { store, knowledge } = await fixture();
+    const ingested = await knowledge.ingest({
+      title: "Quoted Source",
+      content: [
+        "# Quoted source heading",
+        "",
+        "A recovered statement remains attributable.",
+        "- A source list item without a terminal period",
+      ].join("\n"),
+    });
+    const sourceId = ingested.source.id;
+    const page = await knowledge.upsertWikiPage({
+      title: "Quoted Source Heading",
+      summary: "A recovered statement from the quoted source heading.",
+      markdown: `# Quoted Source Heading\n\nA recovered statement remains attributable. [${sourceId}#L3-L4]`,
+      sourceIds: [sourceId],
+    });
+    await store.writeWikiPage(page, "# Quoted Source Heading\n\nCitation removed mechanically.\n");
+
+    const first = await knowledge.repairKnowledge();
+    expect(first.wiki.evidenceStubsRebuilt).toBe(1);
+    await expect(store.readText("wiki/concepts/quoted-source-heading.md"))
+      .resolves.toMatch(/> # Quoted source heading[\s\S]*\[src_.+#L1-L4]/);
+    const lint = await knowledge.lintWiki({ log: false });
+    expect(lint.issues.filter((issue) =>
+      issue.code === "invalid_citation" || issue.code === "unsupported_claim"))
+      .toEqual([]);
+    const second = await knowledge.repairKnowledge();
+    expect(second.wiki.evidenceStubsRebuilt).toBe(0);
+  });
+
   it.skipIf(process.platform === "win32")(
     "rejects vault-relative symlinks that resolve outside the vault",
     async () => {
