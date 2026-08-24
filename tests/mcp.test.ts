@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CreateMessageRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createStudyServer } from "../src/server.js";
 
@@ -129,6 +130,88 @@ describe("MCP surface", () => {
       expect(prompts.prompts.map((prompt) => prompt.name)).toEqual(expect.arrayContaining([
         "grounded-explanation",
       ]));
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("asks a sampling-capable client to judge facet support", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "metis-mcp-sampling-"));
+    roots.push(root);
+    const { server } = await createStudyServer(root);
+    const client = new Client(
+      { name: "sampling-client", version: "1.0.0" },
+      { capabilities: { sampling: {} } },
+    );
+    const prompts: string[] = [];
+    // Stand in for the client's model: read the numbered passages back out of
+    // the prompt and support only the one that answers the question.
+    client.setRequestHandler(CreateMessageRequestSchema, async (request) => {
+      const prompt = request.params.messages
+        .flatMap((message) =>
+          Array.isArray(message.content) ? message.content : [message.content])
+        .map((block) => "text" in block && typeof block.text === "string"
+          ? block.text
+          : "")
+        .join("\n");
+      prompts.push(prompt);
+      const lines = prompt.split("\n");
+      const verdicts: string[] = [];
+      lines.forEach((line, index) => {
+        const numbered = line.match(/^Passage (\d+):$/);
+        if (!numbered) return;
+        const body = lines[index + 1] ?? "";
+        verdicts.push(`${numbered[1]}: ${
+          body.includes("Passive convection") ? "supported" : "insufficient"
+        }`);
+      });
+      return {
+        model: "test-sampler",
+        role: "assistant" as const,
+        content: { type: "text" as const, text: verdicts.join("\n") },
+      };
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    try {
+      const decoy = toolObject(await client.callTool({
+        name: "ingest_source",
+        arguments: {
+          title: "Safety Manual Index",
+          content: "Thermal runaway mechanisms in the loop are documented in the safety manual.",
+        },
+      }));
+      const answer = toolObject(await client.callTool({
+        name: "ingest_source",
+        arguments: {
+          title: "Passive Cooling Note",
+          content: "Passive convection removes decay heat and keeps the reactor coolant subcooled.",
+        },
+      }));
+      const decoyId = String((decoy.source as Record<string, unknown>).id);
+      const answerId = String((answer.source as Record<string, unknown>).id);
+
+      const packet = toolObject(await client.callTool({
+        name: "prepare_grounded_answer",
+        arguments: {
+          question: "Which mechanism prevents thermal runaway in the reactor coolant loop?",
+          groundingMode: "sources_only",
+        },
+      }));
+
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain("Passage 1:");
+      expect(packet.facets).toEqual([expect.objectContaining({
+        status: "supported",
+        statusMethod: "entailment",
+        citations: [`[${answerId}#L1-L1]`],
+        borderlineCitations: [`[${decoyId}#L1-L1]`],
+      })]);
     } finally {
       await client.close();
       await server.close();

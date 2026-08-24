@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { KnowledgeService } from "../src/knowledge.js";
 import { GroundingService } from "../src/grounding.js";
+import type { EntailmentRequest, EntailmentVerdict } from "../src/entailment.js";
 import { RepairService } from "../src/repair.js";
 import { syncMetisSkills } from "../src/skills.js";
 import { StudyStore } from "../src/store.js";
@@ -168,6 +169,116 @@ describe("knowledge and grounding", () => {
     expect(automatic.facets[0]?.status).toBe("supported");
     expect(automatic.facets[1]?.status).toBe("unsupported");
     expect(automatic.coverage).toBe("partial");
+  });
+
+  it("keeps a relevant passage the lexical check cannot confirm in the packet", async () => {
+    const { knowledge, grounding } = await fixture();
+    // The decoy repeats the question's wording and outranks the passage that
+    // actually answers it, so token coverage alone would keep the answer out.
+    const decoy = await knowledge.ingest({
+      title: "Safety Manual Index",
+      content: "Thermal runaway mechanisms in the loop are documented in the safety manual.",
+    });
+    const answer = await knowledge.ingest({
+      title: "Passive Cooling Note",
+      content: "Passive convection removes decay heat and keeps the reactor coolant subcooled.",
+    });
+
+    const packet = await grounding.prepareAnswer(
+      "Which mechanism prevents thermal runaway in the reactor coolant loop?",
+      "sources_only",
+      3,
+    );
+
+    expect(packet.evidence).toHaveLength(2);
+    expect(packet.evidence[0]).toEqual(expect.objectContaining({
+      sourceId: decoy.source.id,
+    }));
+    expect(packet.evidence[0]).not.toHaveProperty("lexicalSupport");
+    expect(packet.evidence[1]).toEqual(expect.objectContaining({
+      sourceId: answer.source.id,
+      lexicalSupport: "related",
+    }));
+    expect(packet.facets[0]).toEqual(expect.objectContaining({
+      status: "partially_supported",
+      citations: [`[${decoy.source.id}#L1-L1]`],
+      borderlineCitations: [`[${answer.source.id}#L1-L1]`],
+    }));
+  });
+
+  it("lets an entailment verdict decide a facet token coverage misreads", async () => {
+    const { knowledge, grounding } = await fixture();
+    const decoy = await knowledge.ingest({
+      title: "Safety Manual Index",
+      content: "Thermal runaway mechanisms in the loop are documented in the safety manual.",
+    });
+    const answer = await knowledge.ingest({
+      title: "Passive Cooling Note",
+      content: "Passive convection removes decay heat and keeps the reactor coolant subcooled.",
+    });
+    const question = "Which mechanism prevents thermal runaway in the reactor coolant loop?";
+    const seen: EntailmentRequest[] = [];
+    grounding.useEntailmentJudge({
+      async judge(requests) {
+        seen.push(...requests);
+        return requests.map((request) => ({
+          facetId: request.facetId,
+          verdicts: request.passages.map((passage) => ({
+            citation: passage.citation,
+            verdict: (passage.citation.includes(answer.source.id)
+              ? "supported"
+              : "insufficient") as EntailmentVerdict,
+          })),
+        }));
+      },
+    });
+
+    const packet = await grounding.prepareAnswer(question, "sources_only", 3);
+
+    // Only packet passages are judged, highest retrieval score first.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.question).toBe(question);
+    expect(seen[0]!.passages.map((passage) => passage.citation)).toEqual([
+      `[${decoy.source.id}#L1-L1]`,
+      `[${answer.source.id}#L1-L1]`,
+    ]);
+    expect(packet.facets).toEqual([{
+      id: "facet_1",
+      question,
+      status: "supported",
+      citations: [`[${answer.source.id}#L1-L1]`],
+      statusMethod: "entailment",
+      borderlineCitations: [`[${decoy.source.id}#L1-L1]`],
+    }]);
+    expect(packet.coverage).toBe("sufficient");
+  });
+
+  it("keeps the lexical status when the entailment judge fails", async () => {
+    const { knowledge, grounding } = await fixture();
+    const decoy = await knowledge.ingest({
+      title: "Safety Manual Index",
+      content: "Thermal runaway mechanisms in the loop are documented in the safety manual.",
+    });
+    await knowledge.ingest({
+      title: "Passive Cooling Note",
+      content: "Passive convection removes decay heat and keeps the reactor coolant subcooled.",
+    });
+    grounding.useEntailmentJudge({
+      judge: () => Promise.reject(new Error("sampling refused")),
+    });
+
+    const packet = await grounding.prepareAnswer(
+      "Which mechanism prevents thermal runaway in the reactor coolant loop?",
+      "sources_only",
+      3,
+    );
+
+    expect(packet.facets[0]).toEqual(expect.objectContaining({
+      status: "partially_supported",
+      citations: [`[${decoy.source.id}#L1-L1]`],
+    }));
+    expect(packet.facets[0]).not.toHaveProperty("statusMethod");
+    expect(packet.evidence).toHaveLength(2);
   });
 
   it("marks incompatible numeric evidence as a conflicting facet", async () => {
