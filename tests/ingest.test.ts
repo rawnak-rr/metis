@@ -15,6 +15,7 @@ import {
 import { KnowledgeService } from "../src/knowledge.js";
 import { createStudyServer } from "../src/server.js";
 import { StudyStore } from "../src/store.js";
+import { sha256 } from "../src/util.js";
 import {
   AnthropicVisionTranscriber,
   CHEAPEST_VISION_MODEL,
@@ -270,10 +271,11 @@ describe("ingestion", () => {
       "utf8",
     )) as Record<string, unknown>;
     expect(derived).toEqual(expect.objectContaining({
-      formatVersion: 1,
+      formatVersion: 2,
       sourceChecksum: ingested.source.checksum,
       method: "pdftotext",
     }));
+    expect(derived.textChecksum).toBe(sha256(String(derived.text)));
     expect(String(derived.text)).toContain("chemical energy");
   });
 
@@ -984,5 +986,186 @@ describe("ingestion over MCP", () => {
       await client.close();
       await server.close();
     }
+  });
+});
+
+describe("derived text integrity", () => {
+  it("refuses to re-transcribe an image whose stored transcript is gone", async () => {
+    const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
+    const { root, store, knowledge } = await fixture(transcriber);
+    await writeFile(path.join(root, "slide.png"), pngBytes());
+    const ingested = await knowledge.ingest({
+      title: "Chlorophyll Slide",
+      sourcePath: "slide.png",
+    });
+    expect(transcriber.calls).toHaveLength(1);
+
+    await rm(path.join(
+      root,
+      ".metis",
+      "cache",
+      "text-v1",
+      `${ingested.source.checksum}.json`,
+    ));
+
+    // A second transcription would move every line citation into this source,
+    // so the read fails instead of quietly answering from different text.
+    const reopened = new KnowledgeService(store, transcriber);
+    expect(await ingestCode(() => reopened.readSourceText(ingested.source)))
+      .toBe("DERIVED_TEXT_UNRECOVERABLE");
+    expect(transcriber.calls).toHaveLength(1);
+  });
+
+  it("rejects a transcript that no longer matches its own checksum", async () => {
+    const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
+    const { root, store, knowledge } = await fixture(transcriber);
+    await writeFile(path.join(root, "slide.png"), pngBytes());
+    const ingested = await knowledge.ingest({
+      title: "Chlorophyll Slide",
+      sourcePath: "slide.png",
+    });
+    const cachePath = path.join(
+      root,
+      ".metis",
+      "cache",
+      "text-v1",
+      `${ingested.source.checksum}.json`,
+    );
+    const entry = JSON.parse(await readFile(cachePath, "utf8")) as
+      Record<string, unknown>;
+    entry.text = "Absorption peaks near 700 nm.";
+    await writeFile(cachePath, `${JSON.stringify(entry)}\n`, "utf8");
+
+    const reopened = new KnowledgeService(store, transcriber);
+    expect(await ingestCode(() => reopened.readSourceText(ingested.source)))
+      .toBe("DERIVED_TEXT_UNRECOVERABLE");
+    expect(transcriber.calls).toHaveLength(1);
+  });
+
+  it("accepts a pre-checksum transcript so an existing vault keeps its citations", async () => {
+    const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
+    const { root, store, knowledge } = await fixture(transcriber);
+    await writeFile(path.join(root, "slide.png"), pngBytes());
+    const ingested = await knowledge.ingest({
+      title: "Chlorophyll Slide",
+      sourcePath: "slide.png",
+    });
+    const cachePath = path.join(
+      root,
+      ".metis",
+      "cache",
+      "text-v1",
+      `${ingested.source.checksum}.json`,
+    );
+    const entry = JSON.parse(await readFile(cachePath, "utf8")) as
+      Record<string, unknown>;
+    delete entry.textChecksum;
+    entry.formatVersion = 1;
+    await writeFile(cachePath, `${JSON.stringify(entry)}\n`, "utf8");
+
+    const reopened = new KnowledgeService(store, transcriber);
+    await expect(reopened.readSourceText(ingested.source))
+      .resolves.toContain("430 nm");
+
+    // Repair is the boundary that adds the missing checksum.
+    const repaired = await new KnowledgeService(store, transcriber)
+      .repairKnowledge({});
+    expect(repaired.derivedText).toEqual(expect.objectContaining({
+      expected: 1,
+      upgraded: 1,
+      missingSourceIds: [],
+    }));
+    const upgraded = JSON.parse(await readFile(cachePath, "utf8")) as
+      Record<string, unknown>;
+    expect(upgraded.formatVersion).toBe(2);
+    expect(upgraded.textChecksum).toBe(sha256(String(upgraded.text)));
+    expect(transcriber.calls).toHaveLength(1);
+  });
+
+  it("recovers a PDF derivation from the raw bytes and re-persists it", async () => {
+    const { root, store, knowledge } = await fixture();
+    await writeFile(
+      path.join(root, "paper.pdf"),
+      pdfBytes("Photosynthesis converts light energy into chemical energy."),
+    );
+    const ingested = await knowledge.ingest({
+      title: "Photosynthesis Paper",
+      sourcePath: "paper.pdf",
+    });
+    const cachePath = path.join(
+      root,
+      ".metis",
+      "cache",
+      "text-v1",
+      `${ingested.source.checksum}.json`,
+    );
+    await rm(cachePath);
+
+    // Unlike a transcript, PDF text is a function of the checksum-verified
+    // bytes, so it is recoverable rather than lost.
+    const reopened = new KnowledgeService(store);
+    await expect(reopened.readSourceText(ingested.source))
+      .resolves.toContain("chemical energy");
+    const rewritten = JSON.parse(await readFile(cachePath, "utf8")) as
+      Record<string, unknown>;
+    expect(rewritten.formatVersion).toBe(2);
+    expect(rewritten.textChecksum).toBe(sha256(String(rewritten.text)));
+  });
+
+  it("reports a missing transcript instead of counting it as retained", async () => {
+    const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
+    const { root, store, knowledge } = await fixture(transcriber);
+    await writeFile(path.join(root, "slide.png"), pngBytes());
+    const ingested = await knowledge.ingest({
+      title: "Chlorophyll Slide",
+      sourcePath: "slide.png",
+    });
+    await rm(path.join(
+      root,
+      ".metis",
+      "cache",
+      "text-v1",
+      `${ingested.source.checksum}.json`,
+    ));
+
+    const repaired = await new KnowledgeService(store, transcriber)
+      .repairKnowledge({});
+    expect(repaired.derivedText).toEqual(expect.objectContaining({
+      expected: 1,
+      verified: 0,
+      missingSourceIds: [ingested.source.id],
+    }));
+  });
+
+  it("backs up a transcript and restores it after the cache is lost", async () => {
+    const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
+    const { root, store, knowledge } = await fixture(transcriber);
+    await writeFile(path.join(root, "slide.png"), pngBytes());
+    const ingested = await knowledge.ingest({
+      title: "Chlorophyll Slide",
+      sourcePath: "slide.png",
+    });
+    const cacheRelative = path.join(
+      ".metis",
+      "cache",
+      "text-v1",
+      `${ingested.source.checksum}.json`,
+    );
+
+    const update = await store.updateVault();
+    const backup = update.backupRelativePath!;
+    await expect(readFile(
+      path.join(root, backup, cacheRelative),
+      "utf8",
+    )).resolves.toContain("430 nm");
+
+    await rm(path.join(root, cacheRelative));
+    const restored = await store.restoreVaultBackup(backup);
+    expect(restored.restored).toBe(true);
+
+    const reopened = new KnowledgeService(store, transcriber);
+    await expect(reopened.readSourceText(ingested.source))
+      .resolves.toContain("430 nm");
+    expect(transcriber.calls).toHaveLength(1);
   });
 });

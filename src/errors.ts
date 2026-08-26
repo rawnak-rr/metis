@@ -33,7 +33,13 @@ export type MetisErrorCode =
   // Commit and integrity.
   | "INGEST_COPY_VERIFICATION_FAILED"
   | "INGEST_COMMIT_FAILED"
-  | "SOURCE_INTEGRITY_FAILED";
+  | "SOURCE_INTEGRITY_FAILED"
+  | "DERIVED_TEXT_UNRECOVERABLE"
+  | "CITATION_MALFORMED"
+  | "CITATION_SOURCE_UNKNOWN"
+  | "CITATION_OUT_OF_BOUNDS"
+  | "CITATION_TOO_BROAD"
+  | "CITATION_BATCH_TOO_LARGE";
 
 /** Codes whose cause is transient; the same request may succeed on retry. */
 const RETRYABLE_CODES = new Set<MetisErrorCode>([

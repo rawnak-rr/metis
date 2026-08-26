@@ -10,7 +10,12 @@ import type {
   StudyState,
   WikiPageRecord,
 } from "./types.js";
-import { GENERATED_WIKI_FORMAT_VERSION, StudyStore } from "./store.js";
+import {
+  DERIVED_TEXT_CACHE_DIRECTORY,
+  GENERATED_WIKI_FORMAT_VERSION,
+  SEARCH_INDEX_CACHE_DIRECTORY,
+  StudyStore,
+} from "./store.js";
 import {
   atomicWrite,
   messageOf,
@@ -53,10 +58,16 @@ import { defaultVisionTranscriber, type VisionTranscriber } from "./vision.js";
 export { tokenize } from "./retrieval.js";
 export { lexicalSupportTokens, stemSupport } from "./claims.js";
 
-const DERIVED_TEXT_FORMAT_VERSION = 1 as const;
-const DERIVED_TEXT_CACHE_DIRECTORY = ".metis/cache/text-v1";
-const SEARCH_INDEX_CACHE_DIRECTORY = ".metis/cache/search-v1";
+/**
+ * Version 2 records a checksum of the derived text itself. Version 1 entries
+ * remain readable so an existing vault keeps its transcripts, but they carry no
+ * integrity guarantee and `metis_repair` upgrades them in place.
+ */
+const DERIVED_TEXT_FORMAT_VERSION = 2 as const;
+const LEGACY_DERIVED_TEXT_FORMAT_VERSION = 1 as const;
 const MAX_CITATION_LINES = 80;
+/** Citation tokens resolvable in one `resolveCitations` call. */
+const MAX_RESOLVED_CITATIONS = 24;
 /** Ceiling on one batch, so a mistaken vault-wide scan fails fast and loudly. */
 const MAX_BATCH_SOURCES = 200;
 /**
@@ -187,9 +198,44 @@ export interface KnowledgeRepairResult {
     indexedChunks: number;
   };
   derivedText: {
-    retained: number;
+    /** Sources whose text cannot be recomputed from the raw bytes. */
+    expected: number;
+    /** Entries whose text matched its recorded checksum. */
+    verified: number;
+    /** Pre-checksum entries rewritten with one. */
+    upgraded: number;
+    /** Pre-checksum entries left as they are, in a dry run. */
+    unverified: number;
+    /**
+     * Sources with no usable entry. Their line citations cannot be resolved,
+     * and for an image transcript nothing but a backup can recover them.
+     */
+    missingSourceIds: string[];
     staleEntriesRemoved: number;
   };
+}
+
+export interface ResolvedCitation {
+  token: string;
+  sourceId: string;
+  title: string;
+  lineStart: number;
+  lineEnd: number;
+  text: string;
+  /** The raw source's digest, verified immediately before this read. */
+  sourceChecksum: string;
+  /** How the cited text was derived, so a transcript stays distinguishable. */
+  extraction: string;
+}
+
+export interface UnresolvedCitation {
+  token: string;
+  error: MetisErrorPayload;
+}
+
+export interface CitationResolution {
+  resolved: ResolvedCitation[];
+  unresolved: UnresolvedCitation[];
 }
 
 export interface SourceSearchOptions {
@@ -1528,15 +1574,48 @@ export class KnowledgeService {
     sources: SourceRecord[],
     dryRun: boolean,
   ): Promise<KnowledgeRepairResult["derivedText"]> {
-    const expected = new Set(sources
-      .filter((source) => isDerivedTextPersisted(source.extraction.method))
-      .map((source) => `${source.checksum}.json`));
+    const persisted = sources
+      .filter((source) => isDerivedTextPersisted(source.extraction.method));
+    const expected = new Set(persisted.map((source) => `${source.checksum}.json`));
     const staleEntriesRemoved = await this.pruneDerivedCache(
       DERIVED_TEXT_CACHE_DIRECTORY,
       expected,
       dryRun,
     );
-    return { retained: expected.size, staleEntriesRemoved };
+    // Counting the entries state expects would report a healthy cache for one
+    // that is entirely absent, so each entry is read and checked instead.
+    let verified = 0;
+    let upgraded = 0;
+    let unverified = 0;
+    const missingSourceIds: string[] = [];
+    for (const source of persisted) {
+      const stored = await this.readDerivedText(source);
+      if (!stored) {
+        missingSourceIds.push(source.id);
+        continue;
+      }
+      if (stored.verified) {
+        verified += 1;
+        continue;
+      }
+      if (dryRun) {
+        unverified += 1;
+        continue;
+      }
+      if (await this.persistDerivedText(source, stored.text)) {
+        upgraded += 1;
+      } else {
+        unverified += 1;
+      }
+    }
+    return {
+      expected: persisted.length,
+      verified,
+      upgraded,
+      unverified,
+      missingSourceIds,
+      staleEntriesRemoved,
+    };
   }
 
   private async pruneDerivedCache(
@@ -1597,6 +1676,70 @@ export class KnowledgeService {
     return removed;
   }
 
+  /**
+   * Read the exact lines a citation token addresses.
+   *
+   * This is deliberately not a search: a token resolves through the source's
+   * identity and line range alone, so the same token returns the same text
+   * regardless of what else has been ingested since. That is what makes a
+   * citation usable as a durable stand-in for the excerpt it names, and it is
+   * why the ranker is not involved. Every read re-verifies the raw source's
+   * checksum, so a token cannot resolve against modified evidence.
+   *
+   * One bad token is reported in `unresolved` rather than failing the batch,
+   * because a caller rehydrating a page wants the excerpts it can still get.
+   */
+  async resolveCitations(tokens: string[]): Promise<CitationResolution> {
+    const requested = unique(tokens.map((token) => token.trim()).filter(Boolean));
+    if (requested.length > MAX_RESOLVED_CITATIONS) {
+      throw new MetisError(
+        "CITATION_BATCH_TOO_LARGE",
+        `Resolve at most ${MAX_RESOLVED_CITATIONS} citations per call; ${requested.length} were requested.`,
+      );
+    }
+    const state = await this.store.readState();
+    const sourcesById = new Map(state.sources.map((source) => [source.id, source]));
+    const linesBySourceId = new Map<string, string[]>();
+    const resolved: ResolvedCitation[] = [];
+    const unresolved: UnresolvedCitation[] = [];
+
+    for (const token of requested) {
+      try {
+        const citation = parseSingleCitation(token);
+        const source = sourcesById.get(citation.sourceId);
+        if (!source) {
+          throw new MetisError(
+            "CITATION_SOURCE_UNKNOWN",
+            `Citation ${token} references source '${citation.sourceId}', which is not in this vault.`,
+          );
+        }
+        let lines = linesBySourceId.get(source.id);
+        if (!lines) {
+          lines = sourceTextLines(await this.readSourceText(source));
+          linesBySourceId.set(source.id, lines);
+        }
+        resolved.push({
+          token: citation.token,
+          sourceId: source.id,
+          title: source.title,
+          lineStart: citation.lineStart,
+          lineEnd: citation.lineEnd,
+          text: sliceCitedLines(lines, citation),
+          sourceChecksum: source.checksum,
+          extraction: describeExtraction(source),
+        });
+      } catch (error) {
+        unresolved.push({
+          token,
+          error: errorPayload(error instanceof MetisError
+            ? error
+            : new MetisError("CITATION_MALFORMED", messageOf(error))),
+        });
+      }
+    }
+    return { resolved, unresolved };
+  }
+
   async readSourceText(source: SourceRecord): Promise<string> {
     // Integrity is verified before any cached text is trusted, so tampering with
     // a raw copy can never be masked by an earlier read.
@@ -1608,8 +1751,20 @@ export class KnowledgeService {
     if (persistent) {
       const stored = await this.readDerivedText(source);
       if (stored !== undefined) {
-        this.sourceTextCache.set(source.id, { checksum: source.checksum, text: stored });
-        return stored;
+        this.sourceTextCache.set(source.id, {
+          checksum: source.checksum,
+          text: stored.text,
+        });
+        return stored.text;
+      }
+      if (descriptor.method === "vision") {
+        // Re-running the model would produce a different transcript, so every
+        // line citation into this source would silently address different text.
+        // Failing loudly keeps a dead citation distinguishable from a moved one.
+        throw new MetisError(
+          "DERIVED_TEXT_UNRECOVERABLE",
+          `The stored transcript for '${source.id}' is missing or failed its integrity check, and an image transcript cannot be reproduced. Restore ${DERIVED_TEXT_CACHE_DIRECTORY} from a Metis backup; re-transcribing would move every line citation into this source.`,
+        );
       }
     }
     const extracted = await extractSourceText({
@@ -1643,6 +1798,7 @@ export class KnowledgeService {
         `${JSON.stringify({
           formatVersion: DERIVED_TEXT_FORMAT_VERSION,
           sourceChecksum: source.checksum,
+          textChecksum: sha256(text),
           method: source.extraction.method,
           ...(source.extraction.model ? { model: source.extraction.model } : {}),
           extractedAt: source.extraction.extractedAt ?? nowIso(),
@@ -1655,24 +1811,40 @@ export class KnowledgeService {
     }
   }
 
-  private async readDerivedText(source: SourceRecord): Promise<string | undefined> {
+  /**
+   * Read stored derived text. A current entry is only returned when the text
+   * matches its own recorded checksum, so a truncated or edited cache file is
+   * indistinguishable from an absent one. A legacy entry predates that checksum
+   * and is returned unverified rather than discarded, because discarding it
+   * would strand the citations that depend on it.
+   */
+  private async readDerivedText(
+    source: SourceRecord,
+  ): Promise<{ text: string; verified: boolean } | undefined> {
     try {
       const raw = await this.store.readText(derivedTextRelativePath(source.checksum));
       const value = JSON.parse(raw) as {
         formatVersion?: unknown;
         sourceChecksum?: unknown;
+        textChecksum?: unknown;
         method?: unknown;
         text?: unknown;
       };
       if (
-        value.formatVersion !== DERIVED_TEXT_FORMAT_VERSION
-        || value.sourceChecksum !== source.checksum
+        value.sourceChecksum !== source.checksum
         || value.method !== source.extraction.method
         || typeof value.text !== "string"
       ) {
         return undefined;
       }
-      return value.text;
+      if (value.formatVersion === DERIVED_TEXT_FORMAT_VERSION) {
+        if (value.textChecksum !== sha256(value.text)) return undefined;
+        return { text: value.text, verified: true };
+      }
+      if (value.formatVersion === LEGACY_DERIVED_TEXT_FORMAT_VERSION) {
+        return { text: value.text, verified: false };
+      }
+      return undefined;
     } catch {
       return undefined;
     }
@@ -1942,27 +2114,10 @@ export class KnowledgeService {
       }
       let lines = sourceLines.get(source.id);
       if (!lines) {
-        lines = (await this.readSourceText(source)).replace(/\r\n/g, "\n").split("\n");
+        lines = sourceTextLines(await this.readSourceText(source));
         sourceLines.set(source.id, lines);
       }
-      if (
-        citation.lineStart < 1
-        || citation.lineEnd < citation.lineStart
-        || citation.lineEnd > lines.length
-      ) {
-        throw new Error(
-          `Citation ${citation.token} points outside source '${source.id}', which has ${lines.length} line${lines.length === 1 ? "" : "s"}.`,
-        );
-      }
-      if (citation.lineEnd - citation.lineStart + 1 > MAX_CITATION_LINES) {
-        throw new Error(
-          `Citation ${citation.token} spans more than ${MAX_CITATION_LINES} lines; cite a more precise passage.`,
-        );
-      }
-      excerptsByToken.set(
-        citation.token,
-        lines.slice(citation.lineStart - 1, citation.lineEnd).join("\n"),
-      );
+      excerptsByToken.set(citation.token, sliceCitedLines(lines, citation));
       citedSourceIds.add(citation.sourceId);
     }
 
@@ -2282,6 +2437,46 @@ interface WikiCitation {
   sourceId: string;
   lineStart: number;
   lineEnd: number;
+}
+
+function sourceTextLines(text: string): string[] {
+  return text.replace(/\r\n/g, "\n").split("\n");
+}
+
+/**
+ * Bounds and precision rules for a citation, shared by wiki validation and
+ * `resolveCitations` so a token that a page may carry is exactly a token that
+ * can be resolved later.
+ */
+function sliceCitedLines(lines: string[], citation: WikiCitation): string {
+  if (
+    citation.lineStart < 1
+    || citation.lineEnd < citation.lineStart
+    || citation.lineEnd > lines.length
+  ) {
+    throw new MetisError(
+      "CITATION_OUT_OF_BOUNDS",
+      `Citation ${citation.token} points outside source '${citation.sourceId}', which has ${lines.length} line${lines.length === 1 ? "" : "s"}.`,
+    );
+  }
+  if (citation.lineEnd - citation.lineStart + 1 > MAX_CITATION_LINES) {
+    throw new MetisError(
+      "CITATION_TOO_BROAD",
+      `Citation ${citation.token} spans more than ${MAX_CITATION_LINES} lines; cite a more precise passage.`,
+    );
+  }
+  return lines.slice(citation.lineStart - 1, citation.lineEnd).join("\n");
+}
+
+function parseSingleCitation(token: string): WikiCitation {
+  const citations = parseWikiCitations(token);
+  if (citations.length !== 1 || citations[0]!.token !== token) {
+    throw new MetisError(
+      "CITATION_MALFORMED",
+      `'${token}' is not a citation token. Expected one token of the form [source_id#L8-L14].`,
+    );
+  }
+  return citations[0]!;
 }
 
 function parseWikiCitations(markdown: string): WikiCitation[] {

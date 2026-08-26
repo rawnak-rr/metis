@@ -11,9 +11,11 @@ Metis deliberately does one thing: ingest material, index it, route to the right
 - Ingest Markdown, plain text, PDF, LaTeX, CSV, TSV, JSON, or YAML from inside a vault, or send text directly.
 - Ingest a whole directory or file list in one call, with per-file outcomes and a single state commit.
 - Preserve a read-only raw copy with SHA-256 provenance, duplicate detection, and integrity verification on every read.
+- Checksum derived PDF and image text as well as the raw bytes, keep it in vault backups, and refuse to re-transcribe an image whose transcript is gone rather than moving its citations.
 - Build and persist a disposable checksum-keyed BM25 index during ingestion, then update it incrementally instead of rechunking and retokenizing unchanged sources for every query.
 - Compile concept pages whose factual prose has validated inline raw-source citations into an Obsidian-compatible wiki.
 - Resolve one compact wiki concept capsule by title, slug, alias, or tag by default; retrieve bounded checksum-verified raw excerpts only when evidence is needed.
+- Read the exact lines a citation token names, independently of retrieval, so a token can be carried in place of the excerpt and the excerpt read back later.
 - Prepare answers in `sources_only`, `sources_first`, or `open` grounding modes with per-facet evidence sufficiency.
 - Visualize a bounded global graph or one concept neighborhood with its supporting sources.
 - Lint wiki provenance, links, orphans, and staleness.
@@ -108,6 +110,7 @@ For a friend, share the repository, have them install the four requirements, and
 4. Ask a question. The assistant should call `prepare_grounded_answer` before responding.
 5. Call `get_knowledge_graph` globally or with a `focusId` to inspect a bounded neighborhood.
 6. Run `lint_wiki` after major ingests to keep the knowledge base connected and trustworthy.
+7. In a long session, keep citation tokens rather than excerpt text and call `resolve_citations` to read a passage back when it is needed again.
 
 For strict closed-book behavior, choose `sources_only`. The normal `sources_first` mode uses the vault whenever it can and permits outside knowledge only when the returned evidence packet identifies a gap. Outside additions must be labelled.
 
@@ -171,6 +174,7 @@ Obsidian Vault/
     ├── backups/               checksummed managed-file update snapshots
     ├── cache/search-v1/       disposable checksum-keyed search indexes
     ├── cache/text-v1/         PDF and image text derived once per checksum
+    ├── cache/packets-v1/      evidence packet citation manifests
     ├── skills/                generated grounding and maintenance Agent Skills
     ├── config.json            local configuration
     ├── repair.json            last successful repair and derivation versions
@@ -193,7 +197,9 @@ Overall coverage is `sufficient` only when every required facet is supported. A 
 
 Static behavior lives once in the MCP server instructions rather than being repeated in every answer packet. JSON tools also emit one model-facing payload rather than duplicating the same object as both text and structured content.
 
-Every grounded-answer packet includes a short `packetId`. For an immediate related follow-up that remains in the same model context, pass it back as `priorPacketId`; Metis re-runs indexed retrieval and raw checksum verification, references citations already present in the earlier packet through `reusedEvidence`, and returns only new evidence. Unknown or expired packet IDs fail open to a complete fresh evidence packet.
+Every grounded-answer packet includes a short `packetId`. For an immediate related follow-up that remains in the same model context, pass it back as `priorPacketId`; Metis re-runs indexed retrieval and raw checksum verification, references citations already present in the earlier packet through `reusedEvidence`, and returns only new evidence. Packet manifests are written to `.metis/cache/packets-v1/`, so a reconnect or a restarted server can still reuse one. A manifest holds the grounding mode and the citations already shown, never the excerpt bodies, because a token plus a verified source rehydrates the text. Unknown or expired packet IDs fail open to a complete fresh evidence packet.
+
+`resolve_citations` reads back the exact lines a citation token names. It is deterministic and does not run the ranker, so a token resolves to the same text however much has been ingested since, which is what makes a citation usable in place of the excerpt when context is tight. Every resolution re-verifies the raw source checksum, and an unusable token is reported next to the excerpts that did resolve.
 
 `search_knowledge` defaults to server-side keyed wiki routing and normally returns one bounded capsule. Use `scope: "sources"` for raw excerpts or `scope: "all"` when both are explicitly useful. Normal wiki and source resources return compact capsules or provenance descriptors; complete generated wiki Markdown is available only through `study://maintenance/wiki/{slug}`. Wiki synthesis is never authoritative evidence for `prepare_grounded_answer`.
 
@@ -209,13 +215,13 @@ npm test
 npm run build
 ```
 
-The test suite covers the immutable source and wiki flow, grounded retrieval, citation validation, link linting, vault migration and repair, and an in-memory MCP client/server exchange.
+The test suite covers the immutable source and wiki flow, grounded retrieval, citation validation and resolution, derived-text integrity, packet reuse across a restart, link linting, vault migration and repair, and an in-memory MCP client/server exchange.
 
 ## Current boundaries
 
 - Retrieval is local BM25-style lexical search behind a direct keyed concept map and checksum-keyed incremental inverted index. Lexical matching is the kernel's weakest layer and the current focus of work. Derived per-source indexes are disposable and versioned; selected line spans are rehydrated only after the raw source checksum is verified. An optional embedding or hybrid reranker can be added without changing the vault format.
 - PDF ingestion extracts embedded text with `pdftotext`; a scanned, image-only PDF fails with `EXTRACT_PDF_FAILED` rather than being transcribed, so export its pages as images to read them.
-- Image transcription is a model output, not a verbatim reading. It is labelled as such on every source record and provenance page, but a transcript can still misread handwriting or dense notation. Its cache entry is the only copy: delete it and the next read re-transcribes, which needs credentials again and may shift line citations.
+- Image transcription is a model output, not a verbatim reading. It is labelled as such on every source record and provenance page, but a transcript can still misread handwriting or dense notation. Its cache entry is the only copy, so it is backed up with state and the wiki; if it is lost anyway, reads fail with `DERIVED_TEXT_UNRECOVERABLE` rather than re-transcribing, because a second transcript would move every line citation into that source.
 - Ingestion is structure-blind: `.csv`, `.json`, and `.yaml` sources are chunked as prose, and a LaTeX `verbatim` environment has its `%` characters treated as comments.
 - The connected LLM performs explanation and wiki synthesis. Metis provides compact evidence packets, persistent state, and one-time server policy rather than embedding a specific model vendor.
 - Local state/log writes are serialized and cross-process locked; ingestion and wiki compilation also roll back generated files when their managed transaction fails. A future shared HTTP deployment still needs transactional multi-user storage and authentication.

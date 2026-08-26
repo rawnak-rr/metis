@@ -1213,3 +1213,151 @@ describe("repair CLI", () => {
     )).resolves.toContain('"formatVersion": 1');
   });
 });
+
+describe("citation resolution", () => {
+  const notes = [
+    "# Gradient descent",
+    "",
+    "Gradient descent iteratively updates parameters in the negative gradient direction.",
+    "A learning rate controls the update step size.",
+    "For a convex differentiable objective, suitable step sizes support convergence.",
+  ].join("\n");
+
+  it("returns the same lines however retrieval has since changed", async () => {
+    const { knowledge, grounding } = await fixture();
+    const ingested = await knowledge.ingest({
+      title: "Gradient Descent Notes",
+      content: notes,
+    });
+    const packet = await grounding.prepareAnswer(
+      "What controls the gradient descent step size?",
+      "sources_only",
+    );
+    const token = packet.evidence[0]!.citation;
+
+    const first = await knowledge.resolveCitations([token]);
+    expect(first.unresolved).toEqual([]);
+    expect(first.resolved).toEqual([expect.objectContaining({
+      token,
+      sourceId: ingested.source.id,
+      sourceChecksum: ingested.source.checksum,
+      title: "Gradient Descent Notes",
+    })]);
+    expect(first.resolved[0]!.text).toContain("step size");
+
+    // A citation addresses a source and a line range, so growing the corpus
+    // cannot move it the way re-running the query could.
+    for (const index of [1, 2, 3]) {
+      await knowledge.ingest({
+        title: `Distractor ${index}`,
+        content: `A learning rate controls the update step size in variant ${index}.`,
+      });
+    }
+    const again = await knowledge.resolveCitations([token]);
+    expect(again.resolved[0]!.text).toBe(first.resolved[0]!.text);
+  });
+
+  it("reports each unusable token without failing the batch", async () => {
+    const { knowledge, grounding } = await fixture();
+    await knowledge.ingest({ title: "Gradient Descent Notes", content: notes });
+    const packet = await grounding.prepareAnswer(
+      "What controls the gradient descent step size?",
+      "sources_only",
+    );
+    const good = packet.evidence[0]!.citation;
+    const sourceId = packet.evidence[0]!.sourceId;
+
+    const resolution = await knowledge.resolveCitations([
+      good,
+      "not a citation",
+      "[src_missing#L1-L2]",
+      `[${sourceId}#L9000-L9001]`,
+    ]);
+    expect(resolution.resolved.map((item) => item.token)).toEqual([good]);
+    expect(resolution.unresolved.map((item) => item.error.code)).toEqual([
+      "CITATION_MALFORMED",
+      "CITATION_SOURCE_UNKNOWN",
+      "CITATION_OUT_OF_BOUNDS",
+    ]);
+  });
+
+  it("refuses a batch larger than the per-call ceiling", async () => {
+    const { knowledge } = await fixture();
+    await expect(knowledge.resolveCitations(
+      Array.from({ length: 25 }, (_, index) => `[src_a#L${index + 1}-L${index + 2}]`),
+    )).rejects.toThrow(/at most 24 citations/);
+  });
+});
+
+describe("packet persistence", () => {
+  const notes = [
+    "# Gradient descent",
+    "",
+    "Gradient descent iteratively updates parameters in the negative gradient direction.",
+    "A learning rate controls the update step size.",
+    "For a convex differentiable objective, suitable step sizes support convergence.",
+  ].join("\n");
+
+  it("reuses a packet built before the process restarted", async () => {
+    const { store, knowledge, grounding } = await fixture();
+    await knowledge.ingest({ title: "Gradient Descent Notes", content: notes });
+    const packet = await grounding.prepareAnswer(
+      "What controls the gradient descent step size?",
+      "sources_only",
+    );
+    expect(packet.evidence.length).toBeGreaterThan(0);
+
+    // Fresh services, as if an MCP client reconnected to a restarted server.
+    const restarted = new GroundingService(store, new KnowledgeService(store));
+    const followUp = await restarted.prepareAnswer(
+      "Which parameter controls the gradient descent update step size?",
+      "sources_only",
+      3,
+      packet.packetId,
+    );
+    expect(followUp.reusedEvidence).toEqual(expect.objectContaining({
+      fromPacketId: packet.packetId,
+    }));
+    expect(followUp.reusedEvidence?.citations.length).toBeGreaterThan(0);
+    expect(followUp).not.toHaveProperty("reuseUnavailable");
+  });
+
+  it("stores citations without a second copy of the evidence", async () => {
+    const { root, knowledge, grounding } = await fixture();
+    await knowledge.ingest({ title: "Gradient Descent Notes", content: notes });
+    const packet = await grounding.prepareAnswer(
+      "What controls the gradient descent step size?",
+      "sources_only",
+    );
+
+    const record = JSON.parse(await readFile(
+      path.join(root, ".metis", "cache", "packets-v1", `${packet.packetId}.json`),
+      "utf8",
+    )) as { citations: string[] };
+    expect(record.citations).toEqual(
+      expect.arrayContaining([packet.evidence[0]!.citation]),
+    );
+    // The excerpt body is deliberately absent: the citation plus a verified
+    // source rehydrates it, and a copy here would be unverified evidence.
+    expect(JSON.stringify(record)).not.toContain("negative gradient direction");
+  });
+
+  it("falls back to full evidence when the prior packet used another mode", async () => {
+    const { store, knowledge, grounding } = await fixture();
+    await knowledge.ingest({ title: "Gradient Descent Notes", content: notes });
+    const packet = await grounding.prepareAnswer(
+      "What controls the gradient descent step size?",
+      "sources_only",
+    );
+
+    const restarted = new GroundingService(store, new KnowledgeService(store));
+    const followUp = await restarted.prepareAnswer(
+      "Which parameter controls the gradient descent update step size?",
+      "sources_first",
+      3,
+      packet.packetId,
+    );
+    expect(followUp.reuseUnavailable).toBe(true);
+    expect(followUp).not.toHaveProperty("reusedEvidence");
+  });
+});

@@ -48,6 +48,33 @@ const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 10_000;
 const STALE_LOCK_MS = 120_000;
 export const GENERATED_WIKI_FORMAT_VERSION = 2 as const;
+/**
+ * Text derived from PDF and image sources. It is the only record of where a
+ * line citation points for a source whose text cannot be recomputed from the
+ * raw bytes, so unlike the search index it is backed up rather than treated as
+ * disposable.
+ */
+export const DERIVED_TEXT_CACHE_DIRECTORY = ".metis/cache/text-v1";
+export const SEARCH_INDEX_CACHE_DIRECTORY = ".metis/cache/search-v1";
+/** Evidence packet citation manifests, so packet reuse survives a restart. */
+export const PACKET_CACHE_DIRECTORY = ".metis/cache/packets-v1";
+const PACKET_RECORD_FORMAT_VERSION = 1 as const;
+/** Newest packet manifests kept on disk, matching the in-memory ceiling. */
+const MAX_PERSISTED_PACKETS = 32;
+const BACKUP_FORMAT_VERSION = 2 as const;
+const SUPPORTED_BACKUP_FORMAT_VERSIONS: ReadonlySet<number> = new Set([1, 2]);
+
+export interface PacketRecord {
+  packetId: string;
+  groundingMode: string;
+  /**
+   * Citation tokens only. Excerpt bodies are deliberately absent: a token plus
+   * a checksum-verified source is enough to rehydrate the text, and storing
+   * bodies would make the cache a second, unverified copy of the evidence.
+   */
+  citations: string[];
+  createdAt: string;
+}
 
 const EMPTY_STATE: StudyState = {
   schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
@@ -148,13 +175,17 @@ export class StudyStore {
       mkdir(path.join(this.metadataDir, "cache", "text-v1"), {
         recursive: true,
       }),
+      mkdir(path.join(this.metadataDir, "cache", "packets-v1"), {
+        recursive: true,
+      }),
     ]);
     await Promise.all([
       safeExistingPath(this.root, "raw"),
       safeExistingPath(this.root, "wiki"),
       safeExistingPath(this.root, ".metis"),
-      safeExistingPath(this.root, ".metis/cache/search-v1"),
-      safeExistingPath(this.root, ".metis/cache/text-v1"),
+      safeExistingPath(this.root, SEARCH_INDEX_CACHE_DIRECTORY),
+      safeExistingPath(this.root, DERIVED_TEXT_CACHE_DIRECTORY),
+      safeExistingPath(this.root, PACKET_CACHE_DIRECTORY),
     ]);
     await Promise.all([
       mkdir(path.join(this.root, "wiki", "concepts"), { recursive: true }),
@@ -643,15 +674,24 @@ export class StudyStore {
       cp(configSource, path.join(backupRoot, "config.json")),
       cp(wikiSource, path.join(backupRoot, "wiki"), { recursive: true }),
     ]);
+    // A transcript cannot be re-derived byte-for-byte, so losing it moves every
+    // line citation into that source. It belongs in the backup even though the
+    // rest of the cache directory is disposable.
+    const derivedTextIncluded = await this.backupDerivedText(backupRoot);
     await atomicWrite(
       path.join(backupRoot, "manifest.json"),
       `${JSON.stringify({
-        backupFormatVersion: 1,
+        backupFormatVersion: BACKUP_FORMAT_VERSION,
         createdAt: nowIso(),
         vaultRoot: this.root,
         stateVersion,
         configVersion,
-        includes: ["state.json", "config.json", "wiki/"],
+        includes: [
+          "state.json",
+          "config.json",
+          "wiki/",
+          ...(derivedTextIncluded ? [`${DERIVED_TEXT_CACHE_DIRECTORY}/`] : []),
+        ],
         excludes: ["raw/"],
         files: await this.backupChecksums(backupRoot),
       }, null, 2)}\n`,
@@ -693,7 +733,10 @@ export class StudyStore {
     const configVersion = schemaVersionOf(config);
     migrateState(state);
     migrateConfig(config);
-    if (manifest.backupFormatVersion !== 1) {
+    if (
+      typeof manifest.backupFormatVersion !== "number"
+      || !SUPPORTED_BACKUP_FORMAT_VERSIONS.has(manifest.backupFormatVersion)
+    ) {
       throw new Error("Unsupported or missing Metis backup format version.");
     }
     if (manifest.stateVersion !== stateVersion || manifest.configVersion !== configVersion) {
@@ -721,11 +764,27 @@ export class StudyStore {
     };
   }
 
+  /**
+   * Copy the derived-text cache into a backup. Returns whether anything was
+   * copied, which is false for a vault with no PDF or image sources.
+   */
+  private async backupDerivedText(backupRoot: string): Promise<boolean> {
+    const source = path.join(this.root, DERIVED_TEXT_CACHE_DIRECTORY);
+    if (!(await this.directoryExists(source))) return false;
+    const target = path.join(backupRoot, DERIVED_TEXT_CACHE_DIRECTORY);
+    await mkdir(path.dirname(target), { recursive: true });
+    await cp(source, target, { recursive: true });
+    return (await listRegularFilesIfPresent(target)).length > 0;
+  }
+
   private async backupChecksums(backupRoot: string): Promise<Record<string, string>> {
     const files = [
       path.join(backupRoot, "state.json"),
       path.join(backupRoot, "config.json"),
       ...await listRegularFiles(path.join(backupRoot, "wiki")),
+      ...await listRegularFilesIfPresent(
+        path.join(backupRoot, DERIVED_TEXT_CACHE_DIRECTORY),
+      ),
     ];
     const entries = await Promise.all(files.map(async (filePath) => [
       path.relative(backupRoot, filePath).split(path.sep).join("/"),
@@ -757,6 +816,115 @@ export class StudyStore {
       throw error;
     }
     await rm(replacedWiki, { recursive: true, force: true });
+    await this.restoreDerivedText(backup);
+  }
+
+  /**
+   * Restore the backed-up derived-text cache. A backup taken before the cache
+   * was covered has none, and in that case the current cache is left alone:
+   * deleting it would strand every line citation into a PDF or image source,
+   * which is the failure this backup coverage exists to prevent.
+   */
+  private async restoreDerivedText(backup: ValidatedBackup): Promise<void> {
+    const source = path.join(backup.root, DERIVED_TEXT_CACHE_DIRECTORY);
+    if (!(await this.directoryExists(source))) return;
+    const target = path.join(this.root, DERIVED_TEXT_CACHE_DIRECTORY);
+    const staged = path.join(
+      this.metadataDir,
+      `.restore-${randomUUID().slice(0, 12)}-text`,
+    );
+    const replaced = path.join(
+      this.metadataDir,
+      `.restore-${randomUUID().slice(0, 12)}-previous-text`,
+    );
+    await cp(source, staged, { recursive: true });
+    const hadTarget = await this.directoryExists(target);
+    if (hadTarget) await rename(target, replaced);
+    try {
+      await mkdir(path.dirname(target), { recursive: true });
+      await rename(staged, target);
+    } catch (error) {
+      if (hadTarget) {
+        await rename(replaced, target).catch(() => undefined);
+      }
+      await rm(staged, { recursive: true, force: true });
+      throw error;
+    }
+    if (hadTarget) await rm(replaced, { recursive: true, force: true });
+  }
+
+  /**
+   * Persist one evidence packet's citation manifest, so packet reuse survives a
+   * restart instead of depending on a process-lifetime map. Packets are a
+   * bounded convenience, so a write failure is reported by absence on the next
+   * read rather than failing the answer that produced it.
+   */
+  async savePacketRecord(record: PacketRecord): Promise<boolean> {
+    try {
+      await atomicWrite(
+        await this.resolveForWrite(packetRecordRelativePath(record.packetId)),
+        `${JSON.stringify({
+          formatVersion: PACKET_RECORD_FORMAT_VERSION,
+          ...record,
+        })}\n`,
+      );
+      await this.prunePacketRecords();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async readPacketRecord(packetId: string): Promise<PacketRecord | undefined> {
+    if (!/^[A-Za-z0-9_-]+$/.test(packetId)) return undefined;
+    try {
+      const raw = await this.readText(packetRecordRelativePath(packetId));
+      const value = JSON.parse(raw) as {
+        formatVersion?: unknown;
+        packetId?: unknown;
+        groundingMode?: unknown;
+        citations?: unknown;
+        createdAt?: unknown;
+      };
+      if (
+        value.formatVersion !== PACKET_RECORD_FORMAT_VERSION
+        || value.packetId !== packetId
+        || typeof value.groundingMode !== "string"
+        || typeof value.createdAt !== "string"
+        || !Array.isArray(value.citations)
+        || value.citations.some((citation) => typeof citation !== "string")
+      ) {
+        return undefined;
+      }
+      return {
+        packetId,
+        groundingMode: value.groundingMode,
+        citations: value.citations as string[],
+        createdAt: value.createdAt,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Keep the newest manifests, so an unbounded session cannot grow the cache. */
+  private async prunePacketRecords(): Promise<void> {
+    const directory = path.join(this.root, PACKET_CACHE_DIRECTORY);
+    const entries = (await readdir(directory, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"));
+    if (entries.length <= MAX_PERSISTED_PACKETS) return;
+    const dated = await Promise.all(entries.map(async (entry) => ({
+      name: entry.name,
+      modifiedMs: await stat(path.join(directory, entry.name))
+        .then((stats) => stats.mtimeMs)
+        .catch(() => 0),
+    })));
+    const stale = dated
+      .sort((a, b) => b.modifiedMs - a.modifiedMs)
+      .slice(MAX_PERSISTED_PACKETS);
+    for (const entry of stale) {
+      await unlink(path.join(directory, entry.name)).catch(() => undefined);
+    }
   }
 
   async dashboard(): Promise<Dashboard> {
@@ -1102,6 +1270,14 @@ export class StudyStore {
       return false;
     }
   }
+
+  private async directoryExists(directoryPath: string): Promise<boolean> {
+    try {
+      return (await stat(directoryPath)).isDirectory();
+    } catch {
+      return false;
+    }
+  }
 }
 
 function processIsAlive(pid: number): boolean {
@@ -1110,6 +1286,20 @@ function processIsAlive(pid: number): boolean {
     return true;
   } catch (error) {
     return isNodeError(error, "EPERM");
+  }
+}
+
+/**
+ * Like `listRegularFiles`, but an absent directory is empty rather than an
+ * error. A vault with no PDF or image sources has no derived-text cache, and a
+ * backup taken before the cache was covered has none either.
+ */
+async function listRegularFilesIfPresent(root: string): Promise<string[]> {
+  try {
+    return await listRegularFiles(root);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return [];
+    throw error;
   }
 }
 
@@ -1130,6 +1320,10 @@ async function listRegularFiles(root: string): Promise<string[]> {
     }
   }
   return files;
+}
+
+function packetRecordRelativePath(packetId: string): string {
+  return path.posix.join(PACKET_CACHE_DIRECTORY, `${packetId}.json`);
 }
 
 function renderMermaidGraph(

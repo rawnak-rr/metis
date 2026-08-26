@@ -76,6 +76,13 @@ export class RepairService {
         `Search indexes reused: ${knowledge.searchIndex.reused}`,
         `Search indexes rebuilt: ${knowledge.searchIndex.rebuilt}`,
         `Evidence stubs rebuilt: ${knowledge.wiki.evidenceStubsRebuilt}`,
+        `Derived text verified: ${knowledge.derivedText.verified}/${knowledge.derivedText.expected}`,
+        ...(knowledge.derivedText.upgraded > 0
+          ? [`Derived text checksummed: ${knowledge.derivedText.upgraded}`]
+          : []),
+        ...(knowledge.derivedText.missingSourceIds.length > 0
+          ? [`Derived text missing for: ${knowledge.derivedText.missingSourceIds.join(", ")}. Line citations into these sources cannot be resolved until the cache is restored from a backup.`]
+          : []),
         `Skill bundle: v${skills.version}`,
         `Backup: \`${update.backupRelativePath}\``,
         "Raw sources were checksum-verified and not modified.",

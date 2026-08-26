@@ -52,6 +52,7 @@ description: Use the Metis MCP vault for source-grounded answers over ingested m
 3. ${GROUNDING_POLICY.unsupportedFacets} Compare conflicting evidence explicitly.
 4. Record durable synthesis with \`upsert_wiki_page\` using verified raw citations.
 5. Keep only the current activity's minimum working set in context. The vault, not the conversation transcript, is persistent memory.
+6. Keep citation tokens rather than excerpt text when context is tight. \`resolve_citations\` reads the same lines back from the verified source, independently of retrieval.
 `;
   const maintenanceSkill = `---
 name: metis-vault-maintenance

@@ -54,10 +54,11 @@ describe("MCP surface", () => {
         "upsert_wiki_page",
         "prepare_grounded_answer",
         "search_knowledge",
+        "resolve_citations",
         "get_knowledge_graph",
         "lint_wiki",
       ]));
-      expect(names).toHaveLength(11);
+      expect(names).toHaveLength(12);
 
       const repairPreview = await client.callTool({
         name: "metis_repair",
@@ -115,6 +116,24 @@ describe("MCP surface", () => {
         arguments: { query: "What produces ATP?", limit: 3 },
       });
       expect(JSON.stringify(toolObject(search))).toContain("mitochondrion");
+
+      const rawSearch = toolObject(await client.callTool({
+        name: "search_knowledge",
+        arguments: { query: "What produces ATP?", limit: 3, scope: "sources" },
+      })) as { evidence: Array<{ citation: string }> };
+      const citation = rawSearch.evidence[0]!.citation;
+      const rehydrated = toolObject(await client.callTool({
+        name: "resolve_citations",
+        arguments: { citations: [citation, "[src_missing#L1-L2]"] },
+      })) as {
+        resolved: Array<{ token: string; text: string }>;
+        unresolved: Array<{ error: { code: string } }>;
+      };
+      expect(rehydrated.resolved).toEqual([expect.objectContaining({
+        token: citation,
+      })]);
+      expect(rehydrated.resolved[0]!.text).toContain("mitochondrion");
+      expect(rehydrated.unresolved[0]!.error.code).toBe("CITATION_SOURCE_UNKNOWN");
 
       const resources = await client.listResources();
       expect(resources.resources.map((resource) => resource.uri)).toContain("study://dashboard");

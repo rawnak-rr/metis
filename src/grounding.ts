@@ -18,9 +18,10 @@ import {
   type EntailmentVerdicts,
 } from "./entailment.js";
 import { StudyStore } from "./store.js";
-import { newId, unique } from "./util.js";
+import { groundingModeSchema } from "./schema.js";
+import { newId, nowIso, unique } from "./util.js";
 
-const MAX_REUSABLE_EVIDENCE_EXCERPTS = 18;
+const MAX_REUSABLE_CITATIONS = 18;
 const MAX_ANSWER_FACETS = 5;
 const MAX_ANSWER_EVIDENCE = 6;
 const SUPPORTED_UNION_TOKEN_COVERAGE = 0.7;
@@ -93,9 +94,16 @@ export interface EvidencePacket {
   reuseUnavailable?: boolean;
 }
 
+/**
+ * What a packet carries forward between turns: the grounding mode it was built
+ * under and the citations it already showed. Excerpt bodies are deliberately
+ * absent, because a citation plus a checksum-verified source rehydrates the
+ * text on demand and storing bodies would make the cache a second, unverified
+ * copy of the evidence.
+ */
 interface CachedEvidencePacket {
   groundingMode: GroundingMode;
-  evidence: PacketEvidenceExcerpt[];
+  citations: string[];
 }
 
 interface AnswerFacet {
@@ -192,30 +200,25 @@ export class GroundingService {
         ? { ...item, lexicalSupport: "related" as const }
         : item);
     const priorPacket = priorPacketId
-      ? this.answerPackets.get(priorPacketId)
+      ? await this.recallAnswerPacket(priorPacketId)
       : undefined;
     const compatiblePriorPacket = priorPacket?.groundingMode === groundingMode
       ? priorPacket
       : undefined;
-    const reusableCitations = compatiblePriorPacket
-      ? new Set(compatiblePriorPacket.evidence.map((item) => item.citation))
-      : new Set<string>();
+    const reusableCitations = new Set(compatiblePriorPacket?.citations ?? []);
     const reusedCitations = completeEvidence
       .filter((item) => reusableCitations.has(item.citation))
       .map((item) => item.citation);
     const evidence = completeEvidence
       .filter((item) => !reusableCitations.has(item.citation));
     const packetId = newId("packet");
-    const reusableEvidence = [
-      ...(compatiblePriorPacket?.evidence ?? []),
-      ...completeEvidence,
-    ].filter((item, position, items) =>
-      items.findIndex((candidate) =>
-        candidate.citation === item.citation) === position)
-      .slice(-MAX_REUSABLE_EVIDENCE_EXCERPTS);
-    this.rememberAnswerPacket(packetId, {
+    const carriedCitations = unique([
+      ...(compatiblePriorPacket?.citations ?? []),
+      ...completeEvidence.map((item) => item.citation),
+    ]).slice(-MAX_REUSABLE_CITATIONS);
+    await this.rememberAnswerPacket(packetId, {
       groundingMode,
-      evidence: reusableEvidence,
+      citations: carriedCitations,
     });
     return {
       packetId,
@@ -278,10 +281,32 @@ export class GroundingService {
     }
   }
 
-  private rememberAnswerPacket(
+  /**
+   * Look up a prior packet, falling back to the vault when this process did not
+   * build it. A packet is a bounded convenience, so an unreadable record is a
+   * miss and the caller receives full evidence again.
+   */
+  private async recallAnswerPacket(
+    packetId: string,
+  ): Promise<CachedEvidencePacket | undefined> {
+    const cached = this.answerPackets.get(packetId);
+    if (cached) return cached;
+    const stored = await this.store.readPacketRecord(packetId);
+    if (!stored) return undefined;
+    const groundingMode = groundingModeSchema.safeParse(stored.groundingMode);
+    if (!groundingMode.success) return undefined;
+    const packet: CachedEvidencePacket = {
+      groundingMode: groundingMode.data,
+      citations: stored.citations,
+    };
+    this.answerPackets.set(packetId, packet);
+    return packet;
+  }
+
+  private async rememberAnswerPacket(
     packetId: string,
     packet: CachedEvidencePacket,
-  ): void {
+  ): Promise<void> {
     this.answerPackets.set(packetId, packet);
     while (this.answerPackets.size > 32) {
       const oldest = this.answerPackets.keys().next().value as
@@ -290,6 +315,12 @@ export class GroundingService {
       if (!oldest) break;
       this.answerPackets.delete(oldest);
     }
+    await this.store.savePacketRecord({
+      packetId,
+      groundingMode: packet.groundingMode,
+      citations: packet.citations,
+      createdAt: nowIso(),
+    });
   }
 
   private async routedEvidence(
