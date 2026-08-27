@@ -48,9 +48,6 @@ describe("MCP surface", () => {
       expect(names).toEqual(expect.arrayContaining([
         "ingest_source",
         "ingest_sources",
-        "metis_repair",
-        "metis_restore_backup",
-        "list_metis_backups",
         "upsert_wiki_page",
         "prepare_grounded_answer",
         "search_knowledge",
@@ -58,17 +55,7 @@ describe("MCP surface", () => {
         "get_knowledge_graph",
         "lint_wiki",
       ]));
-      expect(names).toHaveLength(12);
-
-      const repairPreview = await client.callTool({
-        name: "metis_repair",
-        arguments: { dryRun: true },
-      });
-      expect(toolObject(repairPreview)).toEqual(expect.objectContaining({
-        dryRun: true,
-        repaired: false,
-        migration: expect.objectContaining({ targetStateVersion: 5 }),
-      }));
+      expect(names).toHaveLength(9);
 
       const ingested = await client.callTool({
         name: "ingest_source",
@@ -91,24 +78,14 @@ describe("MCP surface", () => {
         },
       });
       toolObject(wiki);
-      await writeFile(
-        path.join(root, "wiki", "concepts", "mitochondrion.md"),
-        "# Mitochondrion\n\nLegacy prose without inline evidence.\n",
-        "utf8",
-      );
-      const repaired = await client.callTool({
-        name: "metis_repair",
+
+      const health = toolObject(await client.callTool({
+        name: "lint_wiki",
         arguments: {},
-      });
-      expect(toolObject(repaired)).toEqual(expect.objectContaining({
-        repaired: true,
-        wikiHealth: expect.objectContaining({
-          healthy: true,
-          issueCounts: expect.objectContaining({ error: 0 }),
-        }),
-        knowledge: expect.objectContaining({
-          wiki: expect.objectContaining({ evidenceStubsRebuilt: 1 }),
-        }),
+      }));
+      expect(health).toEqual(expect.objectContaining({
+        healthy: true,
+        issueCounts: expect.objectContaining({ error: 0 }),
       }));
 
       const search = await client.callTool({

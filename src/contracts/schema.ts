@@ -1,8 +1,5 @@
 import { z } from "zod";
 
-export const CURRENT_STATE_SCHEMA_VERSION = 5 as const;
-export const CURRENT_CONFIG_SCHEMA_VERSION = 1 as const;
-
 export const groundingModeSchema = z.enum([
   "sources_only",
   "sources_first",
@@ -75,14 +72,12 @@ export const conceptRecordSchema = z.object({
 }).strict();
 
 export const studyStateSchema = z.object({
-  schemaVersion: z.literal(CURRENT_STATE_SCHEMA_VERSION),
   sources: z.array(sourceRecordSchema),
   wikiPages: z.array(wikiPageRecordSchema),
   concepts: z.array(conceptRecordSchema),
 }).strict();
 
 export const studyConfigSchema = z.object({
-  schemaVersion: z.literal(CURRENT_CONFIG_SCHEMA_VERSION),
   name: z.string().min(1),
   createdAt: z.string().min(1),
   groundingDefault: groundingModeSchema,
@@ -104,10 +99,4 @@ export function parseStudyState(value: unknown): StudyState {
 
 export function parseStudyConfig(value: unknown): StudyConfig {
   return studyConfigSchema.parse(value);
-}
-
-export function schemaVersionOf(value: unknown): number {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
-  const version = (value as Record<string, unknown>).schemaVersion;
-  return typeof version === "number" && Number.isInteger(version) ? version : 0;
 }

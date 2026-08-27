@@ -17,14 +17,7 @@ import type {
   StudyState,
   WikiPageRecord,
 } from "../contracts/types.js";
-import { migrateConfig, migrateState } from "../contracts/migrations.js";
-import {
-  CURRENT_CONFIG_SCHEMA_VERSION,
-  CURRENT_STATE_SCHEMA_VERSION,
-  parseStudyConfig,
-  parseStudyState,
-  schemaVersionOf,
-} from "../contracts/schema.js";
+import { parseStudyConfig, parseStudyState } from "../contracts/schema.js";
 import {
   atomicWrite,
   isNodeError,
@@ -34,12 +27,6 @@ import {
   safeWritePath,
   stripFrontmatter,
 } from "../shared/util.js";
-import {
-  backupManagedFiles,
-  restoreManagedFiles,
-  validateBackup,
-  type ValidatedBackup,
-} from "./backup.js";
 import {
   DERIVED_TEXT_CACHE_DIRECTORY,
   PACKET_CACHE_DIRECTORY,
@@ -58,52 +45,10 @@ const LOCK_TIMEOUT_MS = 10_000;
 const STALE_LOCK_MS = 120_000;
 
 const EMPTY_STATE: StudyState = {
-  schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
   sources: [],
   wikiPages: [],
   concepts: [],
 };
-
-export interface VaultInspection {
-  vaultRoot: string;
-  stateVersion: number;
-  configVersion: number;
-  targetStateVersion: number;
-  targetConfigVersion: number;
-  updateRequired: boolean;
-  generatedSchemaCurrent: boolean;
-  issues: string[];
-}
-
-export interface VaultUpdateResult extends VaultInspection {
-  dryRun: boolean;
-  updated: boolean;
-  /** Schema versions found on disk before this call, for migration reporting. */
-  previousStateVersion: number;
-  previousConfigVersion: number;
-  updateWasRequired: boolean;
-  backupRelativePath?: string;
-  actions: string[];
-}
-
-export interface VaultRestoreResult {
-  restored: boolean;
-  dryRun: boolean;
-  restoredFrom: string;
-  recoveryBackupRelativePath?: string;
-  stateVersion: number;
-  configVersion: number;
-  actions: string[];
-}
-
-export interface VaultBackupSummary {
-  relativePath: string;
-  createdAt?: string;
-  stateVersion?: number;
-  configVersion?: number;
-  integrity: "valid" | "invalid";
-  issue?: string;
-}
 
 export interface ManagedMutationEffects {
   sourcePages?: Array<{ source: SourceRecord; preview: string }>;
@@ -177,11 +122,11 @@ export class StudyStore {
 
       let config: StudyConfig;
       if (await this.exists(this.configPath)) {
-        const rawConfig = JSON.parse(await readFile(this.configPath, "utf8")) as unknown;
-        config = migrateConfig(rawConfig).value;
+        config = parseStudyConfig(
+          JSON.parse(await readFile(this.configPath, "utf8")) as unknown,
+        );
       } else {
         config = {
-          schemaVersion: CURRENT_CONFIG_SCHEMA_VERSION,
           name: name?.trim() || path.basename(this.root) || "Study Vault",
           createdAt: nowIso(),
           groundingDefault: "sources_first",
@@ -190,8 +135,7 @@ export class StudyStore {
       }
 
       if (!(await this.exists(path.join(this.root, "wiki", "index.md")))) {
-        const rawState = JSON.parse(await readFile(this.statePath, "utf8")) as unknown;
-        await this.rebuildWikiIndexFile(migrateState(rawState).value);
+        await this.rebuildWikiIndexFile(await this.readStateFile());
       }
       if (!(await this.exists(path.join(this.root, "wiki", "log.md")))) {
         await atomicWrite(
@@ -353,256 +297,6 @@ export class StudyStore {
     );
   }
 
-  private async refreshWikiConceptFrontmatter(state: StudyState): Promise<void> {
-    for (const page of state.wikiPages) {
-      const relativePath = path.posix.join(
-        "wiki",
-        "concepts",
-        `${page.slug}.md`,
-      );
-      const markdown = await readFile(
-        await safeExistingPath(this.root, relativePath),
-        "utf8",
-      );
-      await atomicWrite(
-        await safeWritePath(this.root, relativePath),
-        wikiPageText(page, stripFrontmatter(markdown)),
-      );
-    }
-  }
-
-  async inspectVault(): Promise<VaultInspection> {
-    await this.initialize();
-    return this.enqueueWrite(async () => this.inspectVaultFiles());
-  }
-
-  async updateVault(options: {
-    dryRun?: boolean;
-    deferKnowledgeRefresh?: boolean;
-  } = {}): Promise<VaultUpdateResult> {
-    await this.initialize();
-    return this.enqueueWrite(async () => {
-      const rawState = JSON.parse(await readFile(this.statePath, "utf8")) as unknown;
-      const rawConfig = JSON.parse(await readFile(this.configPath, "utf8")) as unknown;
-      const stateMigration = migrateState(rawState);
-      const configMigration = migrateConfig(rawConfig);
-      const schemaPath = path.join(this.root, "wiki", "SCHEMA.md");
-      const existingSchema = await this.exists(schemaPath)
-        ? await readFile(schemaPath, "utf8")
-        : "";
-      const generatedSchemaCurrent = existingSchema === WIKI_SCHEMA;
-      const knowledgeRefreshAction = options.deferKnowledgeRefresh
-        ? "Deferred generated knowledge refresh to the repair phase."
-        : "Refreshed generated wiki schema, concept frontmatter, and index files.";
-      const plannedActions = [
-        ...stateMigration.actions,
-        ...configMigration.actions,
-        "Validated state and configuration against the current runtime schemas.",
-        knowledgeRefreshAction,
-        "Preserved immutable raw sources without modification.",
-      ];
-      const base: VaultInspection = {
-        vaultRoot: this.root,
-        stateVersion: stateMigration.beforeVersion,
-        configVersion: configMigration.beforeVersion,
-        targetStateVersion: CURRENT_STATE_SCHEMA_VERSION,
-        targetConfigVersion: CURRENT_CONFIG_SCHEMA_VERSION,
-        updateRequired: stateMigration.beforeVersion !== CURRENT_STATE_SCHEMA_VERSION
-          || configMigration.beforeVersion !== CURRENT_CONFIG_SCHEMA_VERSION
-          || !generatedSchemaCurrent,
-        generatedSchemaCurrent,
-        issues: [],
-      };
-      if (options.dryRun) {
-        return {
-          ...base,
-          dryRun: true,
-          updated: false,
-          previousStateVersion: base.stateVersion,
-          previousConfigVersion: base.configVersion,
-          updateWasRequired: base.updateRequired,
-          actions: plannedActions,
-        };
-      }
-
-      const backupRelativePath = await backupManagedFiles(
-        this,
-        stateMigration.beforeVersion,
-        configMigration.beforeVersion,
-      );
-      try {
-        await this.writeStateFile(stateMigration.value);
-        await this.writeConfigFile(configMigration.value);
-        await atomicWrite(schemaPath, WIKI_SCHEMA);
-        if (!options.deferKnowledgeRefresh) {
-          await this.refreshWikiConceptFrontmatter(stateMigration.value);
-          await this.rebuildWikiIndexFile(stateMigration.value);
-        }
-        if (!options.deferKnowledgeRefresh) {
-          await this.appendLogFile("update", "Metis vault update", [
-            `State schema: v${stateMigration.beforeVersion} → v${stateMigration.afterVersion}`,
-            `Config schema: v${configMigration.beforeVersion} → v${configMigration.afterVersion}`,
-            `Backup: \`${backupRelativePath}\``,
-            "Raw sources were not modified.",
-          ]);
-        }
-      } catch (error) {
-        try {
-          await restoreManagedFiles(
-            this,
-            await validateBackup(this, backupRelativePath),
-          );
-        } catch (restoreError) {
-          throw new Error(
-            `Metis schema migration failed and automatic rollback also failed. Migration error: ${messageOf(error)} Rollback error: ${messageOf(restoreError)} Manual backup: ${backupRelativePath}`,
-          );
-        }
-        throw new Error(
-          `Metis schema migration failed; managed files were automatically restored from '${backupRelativePath}'. ${messageOf(error)}`,
-        );
-      }
-      return {
-        ...base,
-        stateVersion: stateMigration.afterVersion,
-        configVersion: configMigration.afterVersion,
-        updateRequired: false,
-        generatedSchemaCurrent: true,
-        dryRun: false,
-        updated: true,
-        previousStateVersion: base.stateVersion,
-        previousConfigVersion: base.configVersion,
-        updateWasRequired: base.updateRequired,
-        backupRelativePath,
-        actions: plannedActions,
-      };
-    });
-  }
-
-  async restoreVaultBackup(
-    backupRelativePath: string,
-    options: { dryRun?: boolean } = {},
-  ): Promise<VaultRestoreResult> {
-    await this.initialize();
-    return this.enqueueWrite(async () => {
-      const backup = await validateBackup(this, backupRelativePath);
-      const actions = [
-        `Validated backup '${backupRelativePath}'.`,
-        `Restore state schema v${backup.stateVersion} and config schema v${backup.configVersion}.`,
-        "Replace managed state, configuration, and wiki files.",
-        "Preserve raw sources without modification.",
-      ];
-      if (options.dryRun) {
-        return {
-          restored: false,
-          dryRun: true,
-          restoredFrom: backupRelativePath,
-          stateVersion: backup.stateVersion,
-          configVersion: backup.configVersion,
-          actions,
-        };
-      }
-
-      const currentState = JSON.parse(await readFile(this.statePath, "utf8")) as unknown;
-      const currentConfig = JSON.parse(await readFile(this.configPath, "utf8")) as unknown;
-      const recoveryBackupRelativePath = await backupManagedFiles(
-        this,
-        schemaVersionOf(currentState),
-        schemaVersionOf(currentConfig),
-      );
-      await restoreManagedFiles(this, backup);
-      await this.appendLogFile("restore", "Metis vault backup restored", [
-        `Restored from: \`${backupRelativePath}\``,
-        `Recovery backup of replaced files: \`${recoveryBackupRelativePath}\``,
-        "Raw sources were not modified.",
-      ]);
-      return {
-        restored: true,
-        dryRun: false,
-        restoredFrom: backupRelativePath,
-        recoveryBackupRelativePath,
-        stateVersion: backup.stateVersion,
-        configVersion: backup.configVersion,
-        actions,
-      };
-    });
-  }
-
-  async listVaultBackups(): Promise<VaultBackupSummary[]> {
-    await this.initialize();
-    return this.enqueueWrite(async () => {
-      const backupsRelative = path.posix.join(".metis", "backups");
-      let entries: Dirent<string>[];
-      try {
-        entries = await readdir(
-          await safeExistingPath(this.root, backupsRelative),
-          { withFileTypes: true },
-        );
-      } catch (error) {
-        if (isNodeError(error, "ENOENT")) return [];
-        throw error;
-      }
-      const summaries = await Promise.all(entries
-        .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-        .map(async (entry): Promise<VaultBackupSummary> => {
-          const relativePath = path.posix.join(backupsRelative, entry.name);
-          try {
-            const validated = await validateBackup(this, relativePath);
-            return {
-              relativePath,
-              ...(validated.createdAt !== undefined
-                ? { createdAt: validated.createdAt }
-                : {}),
-              stateVersion: validated.stateVersion,
-              configVersion: validated.configVersion,
-              integrity: "valid",
-            };
-          } catch (error) {
-            return {
-              relativePath,
-              integrity: "invalid",
-              issue: messageOf(error),
-            };
-          }
-        }));
-      return summaries.sort((a, b) =>
-        (b.createdAt ?? b.relativePath).localeCompare(a.createdAt ?? a.relativePath));
-    });
-  }
-
-  private async inspectVaultFiles(): Promise<VaultInspection> {
-    const rawState = JSON.parse(await readFile(this.statePath, "utf8")) as unknown;
-    const rawConfig = JSON.parse(await readFile(this.configPath, "utf8")) as unknown;
-    const stateVersion = schemaVersionOf(rawState);
-    const configVersion = schemaVersionOf(rawConfig);
-    const issues: string[] = [];
-    try {
-      migrateState(rawState);
-    } catch (error) {
-      issues.push(error instanceof Error ? error.message : String(error));
-    }
-    try {
-      migrateConfig(rawConfig);
-    } catch (error) {
-      issues.push(error instanceof Error ? error.message : String(error));
-    }
-    const schemaPath = path.join(this.root, "wiki", "SCHEMA.md");
-    const generatedSchemaCurrent = await this.exists(schemaPath)
-      && await readFile(schemaPath, "utf8") === WIKI_SCHEMA;
-    return {
-      vaultRoot: this.root,
-      stateVersion,
-      configVersion,
-      targetStateVersion: CURRENT_STATE_SCHEMA_VERSION,
-      targetConfigVersion: CURRENT_CONFIG_SCHEMA_VERSION,
-      updateRequired: stateVersion !== CURRENT_STATE_SCHEMA_VERSION
-        || configVersion !== CURRENT_CONFIG_SCHEMA_VERSION
-        || !generatedSchemaCurrent
-        || issues.length > 0,
-      generatedSchemaCurrent,
-      issues,
-    };
-  }
-
   private async commitManagedMutation(
     state: StudyState,
     writes: Array<{ relativePath: string; content: string }>,
@@ -660,23 +354,14 @@ export class StudyStore {
     }
   }
 
-  private async readVersionedFile<T>(
+  private async readValidatedFile<T>(
     filePath: string,
-    label: "state" | "config",
-    expectedVersion: number,
     parse: (value: unknown) => T,
   ): Promise<T> {
-    const value = JSON.parse(await readFile(filePath, "utf8")) as unknown;
-    const version = schemaVersionOf(value);
-    if (version !== expectedVersion) {
-      throw new Error(
-        `Vault ${label} schema v${version} requires repair to v${expectedVersion}. Run 'metis repair' or ask the connected LLM to call metis_repair.`,
-      );
-    }
-    return parse(value);
+    return parse(JSON.parse(await readFile(filePath, "utf8")) as unknown);
   }
 
-  private async writeVersionedFile<T>(
+  private async writeValidatedFile<T>(
     filePath: string,
     value: T,
     parse: (value: unknown) => T,
@@ -685,29 +370,19 @@ export class StudyStore {
   }
 
   private readStateFile(): Promise<StudyState> {
-    return this.readVersionedFile(
-      this.statePath,
-      "state",
-      CURRENT_STATE_SCHEMA_VERSION,
-      parseStudyState,
-    );
+    return this.readValidatedFile(this.statePath, parseStudyState);
   }
 
   private readConfigFile(): Promise<StudyConfig> {
-    return this.readVersionedFile(
-      this.configPath,
-      "config",
-      CURRENT_CONFIG_SCHEMA_VERSION,
-      parseStudyConfig,
-    );
+    return this.readValidatedFile(this.configPath, parseStudyConfig);
   }
 
   private writeStateFile(state: StudyState): Promise<void> {
-    return this.writeVersionedFile(this.statePath, state, parseStudyState);
+    return this.writeValidatedFile(this.statePath, state, parseStudyState);
   }
 
   private writeConfigFile(config: StudyConfig): Promise<void> {
-    return this.writeVersionedFile(this.configPath, config, parseStudyConfig);
+    return this.writeValidatedFile(this.configPath, config, parseStudyConfig);
   }
 
   private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {

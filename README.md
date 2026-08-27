@@ -11,7 +11,7 @@ Metis deliberately does one thing: ingest material, index it, route to the right
 - Ingest Markdown, plain text, PDF, LaTeX, CSV, TSV, JSON, or YAML from inside a vault, or send text directly.
 - Ingest a whole directory or file list in one call, with per-file outcomes and a single state commit.
 - Preserve a read-only raw copy with SHA-256 provenance, duplicate detection, and integrity verification on every read.
-- Checksum derived PDF and image text as well as the raw bytes, keep it in vault backups, and refuse to re-transcribe an image whose transcript is gone rather than moving its citations.
+- Checksum derived PDF and image text as well as the raw bytes, and refuse to re-transcribe an image whose transcript is gone rather than moving its citations.
 - Build and persist a disposable checksum-keyed BM25 index during ingestion, then update it incrementally instead of rechunking and retokenizing unchanged sources for every query.
 - Compile concept pages whose factual prose has validated inline raw-source citations into an Obsidian-compatible wiki.
 - Resolve one compact wiki concept capsule by title, slug, alias, or tag by default; retrieve bounded checksum-verified raw excerpts only when evidence is needed.
@@ -19,7 +19,6 @@ Metis deliberately does one thing: ingest material, index it, route to the right
 - Prepare answers in `sources_only`, `sources_first`, or `open` grounding modes with per-facet evidence sufficiency.
 - Visualize a bounded global graph or one concept neighborhood with its supporting sources.
 - Lint wiki provenance, links, orphans, and staleness.
-- Migrate and repair an entire vault, refresh portable agent skills, and incrementally rebuild derived knowledge from verified raw evidence.
 - Expose tools, resources, and reusable prompts over MCP stdio.
 
 ## Requirements
@@ -53,34 +52,6 @@ METIS_VAULT_PATH="/absolute/path/to/Obsidian Vault" npm start
 ```
 
 The process speaks MCP over standard input/output, so it will wait quietly for an MCP client rather than display an interactive terminal.
-
-## Repairing or updating a vault
-
-Keep the Metis application and study vault in separate directories. After updating and rebuilding the application, repair the existing vault directly:
-
-```sh
-npm run repair -- --vault "/absolute/path/to/Obsidian Vault"
-# Installed package:
-metis repair --vault "/absolute/path/to/Obsidian Vault"
-```
-
-With an MCP client, reconnect to the latest build and tell the connected LLM:
-
-> Metis repair
-
-The server instruction maps that request to `metis_repair`. The command and MCP tool use the same workflow: refuse newer-schema downgrades, create a checksummed timestamped backup under `.metis/backups/`, run every migration in order, reconcile safe state references, repair generated source pages and concept frontmatter, remove untracked files from the Metis-managed `wiki/concepts/` and `wiki/sources/` directories, rebuild mechanically invalid concept pages as citation-valid verbatim evidence stubs, refresh the portable Agent Skills bundle, and return bounded wiki health. Lexical mismatch alone does not trigger a rebuild. Valid model-authored synthesis is preserved, and removed managed files remain recoverable from the backup.
-
-Raw sources are checksum-verified, restored to read-only permissions when necessary, and never rewritten. A missing or modified raw source stops repair and rolls managed state and wiki files back instead of inventing evidence. Failed repairs retain a direct backup path.
-
-Repair uses checksum-valid search indexes and rebuilds only missing or incompatible entries by default. Use `--full` on the CLI or `{"knowledgeMode":"full"}` through MCP only when every derived index should be regenerated. Use `--dry-run` or `{"dryRun":true}` to inspect planned work without creating a backup or generated skills.
-
-`metis update` remains a CLI alias for compatibility; the MCP boundary is the single `metis_repair` tool so discovery does not carry two overlapping schemas.
-
-Repair writes install-ready `metis-grounded-study` and `metis-vault-maintenance` skills under `.metis/skills/`, with `SKILL.md`, OpenAI agent metadata, and a checksummed version manifest. Metis does not overwrite a client's global or project-specific skill directory; MCP clients receive the equivalent server policy automatically, while clients with Agent Skills support can install or link the generated folders explicitly.
-
-Use `metis_restore_backup` with a backup path returned by repair to preview or restore managed state/config/wiki files. A restore first creates a recovery backup and never modifies raw evidence or exports.
-
-Use `list_metis_backups` to inspect a bounded newest-first page while verifying every managed-file checksum. Metis does not automatically delete backups.
 
 ## Connect an MCP client
 
@@ -129,7 +100,7 @@ For strict closed-book behavior, choose `sources_only`. The normal `sources_firs
 
 Text extraction never changes a line's number, so a citation such as `[src_ab12#L8-L14]` addresses the same lines in the extracted text and in the raw file you can open in Obsidian.
 
-Non-PDF images are transcribed with `claude-haiku-4-5`, the cheapest Claude model with vision, because transcription is high volume and needs no reasoning. Set `METIS_VISION_MODEL` to use a stronger reader. Credentials are resolved by the Anthropic SDK (`ANTHROPIC_API_KEY`, or an `ant auth login` profile). Because a transcript cannot be re-derived byte-for-byte, it is persisted under `.metis/cache/text-v1/` and reused for every later read, duplicate ingestion, and repair — an image is never transcribed twice, and its line citations stay stable. PDF text is cached the same way. Every source record carries its extraction method, media type, and transcribing model, and the generated provenance page shows them, so model-transcribed evidence is never mistaken for verbatim text.
+Non-PDF images are transcribed with `claude-haiku-4-5`, the cheapest Claude model with vision, because transcription is high volume and needs no reasoning. Set `METIS_VISION_MODEL` to use a stronger reader. Credentials are resolved by the Anthropic SDK (`ANTHROPIC_API_KEY`, or an `ant auth login` profile). Because a transcript cannot be re-derived byte-for-byte, it is persisted under `.metis/cache/text-v1/` and reused for every later read and duplicate ingestion, so an image is never transcribed twice, and its line citations stay stable. PDF text is cached the same way. Every source record carries its extraction method, media type, and transcribing model, and the generated provenance page shows them, so model-transcribed evidence is never mistaken for verbatim text.
 
 Text sources must be valid UTF-8; a byte-order mark is accepted and stripped. Text and PDF sources are capped at 32 MiB, images at 5 MiB.
 
@@ -171,13 +142,10 @@ Obsidian Vault/
 │   ├── log.md                 append-only operation history
 │   └── SCHEMA.md              rules for maintaining the wiki
 └── .metis/
-    ├── backups/               checksummed managed-file update snapshots
     ├── cache/search-v1/       disposable checksum-keyed search indexes
     ├── cache/text-v1/         PDF and image text derived once per checksum
     ├── cache/packets-v1/      evidence packet citation manifests
-    ├── skills/                generated grounding and maintenance Agent Skills
     ├── config.json            local configuration
-    ├── repair.json            last successful repair and derivation versions
     └── state.json             sources, wiki pages, and concept manifests
 ```
 
@@ -215,13 +183,13 @@ npm test
 npm run build
 ```
 
-The test suite covers the immutable source and wiki flow, grounded retrieval, citation validation and resolution, derived-text integrity, packet reuse across a restart, link linting, vault migration and repair, and an in-memory MCP client/server exchange.
+The test suite covers the immutable source and wiki flow, grounded retrieval, citation validation and resolution, derived-text integrity, packet reuse across a restart, link linting, and an in-memory MCP client/server exchange.
 
 ## Current boundaries
 
-- Retrieval is local BM25-style lexical search behind a direct keyed concept map and checksum-keyed incremental inverted index. Lexical matching is the kernel's weakest layer and the current focus of work. Derived per-source indexes are disposable and versioned; selected line spans are rehydrated only after the raw source checksum is verified. An optional embedding or hybrid reranker can be added without changing the vault format.
+- Retrieval is local BM25-style lexical search behind a direct keyed concept map and checksum-keyed incremental inverted index. Lexical matching is the kernel's weakest layer and the current focus of work. Derived per-source indexes are disposable and carry a derivation fingerprint, so a changed parser, chunker, or tokenizer rebuilds them automatically; selected line spans are rehydrated only after the raw source checksum is verified. An optional embedding or hybrid reranker can be added without changing the vault format.
 - PDF ingestion extracts embedded text with `pdftotext`; a scanned, image-only PDF fails with `EXTRACT_PDF_FAILED` rather than being transcribed, so export its pages as images to read them.
-- Image transcription is a model output, not a verbatim reading. It is labelled as such on every source record and provenance page, but a transcript can still misread handwriting or dense notation. Its cache entry is the only copy, so it is backed up with state and the wiki; if it is lost anyway, reads fail with `DERIVED_TEXT_UNRECOVERABLE` rather than re-transcribing, because a second transcript would move every line citation into that source.
+- Image transcription is a model output, not a verbatim reading. It is labelled as such on every source record and provenance page, but a transcript can still misread handwriting or dense notation. Its cache entry under `.metis/cache/text-v1/` is the only copy, so back that directory up yourself; if it is lost, reads fail with `DERIVED_TEXT_UNRECOVERABLE` rather than re-transcribing, because a second transcript would move every line citation into that source.
 - Ingestion is structure-blind: `.csv`, `.json`, and `.yaml` sources are chunked as prose, and a LaTeX `verbatim` environment has its `%` characters treated as comments.
 - The connected LLM performs explanation and wiki synthesis. Metis provides compact evidence packets, persistent state, and one-time server policy rather than embedding a specific model vendor.
 - Local state/log writes are serialized and cross-process locked; ingestion and wiki compilation also roll back generated files when their managed transaction fails. A future shared HTTP deployment still needs transactional multi-user storage and authentication.

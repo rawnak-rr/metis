@@ -2,7 +2,12 @@ import type { SearchChunk, SourceRecord } from "../contracts/types.js";
 import { isStopWord, stemSearch, tokenize, tokenizeRaw } from "../shared/lexicon.js";
 import { sha256, unique } from "../shared/util.js";
 
-export const SEARCH_INDEX_FORMAT_VERSION = 1 as const;
+/**
+ * Fingerprint of how a persisted index was derived. A cached entry whose
+ * fingerprint differs from this build's is discarded and rebuilt, so changing
+ * the parser, the chunker, or the tokenizer invalidates every stale index
+ * automatically instead of silently reusing one.
+ */
 export const SEARCH_INDEX_DERIVATION_VERSION = [
   "text-parser-v2",
   "chunks-14-2-1400",
@@ -26,7 +31,6 @@ export interface PersistedSearchChunk {
 }
 
 export interface PersistedSourceSearchIndex {
-  formatVersion: typeof SEARCH_INDEX_FORMAT_VERSION;
   derivationVersion: string;
   sourceChecksum: string;
   sourceKind: SourceRecord["kind"];
@@ -135,7 +139,6 @@ export class IncrementalBm25Index {
     const indexed = this.sources.get(sourceId);
     if (!indexed) return undefined;
     return {
-      formatVersion: SEARCH_INDEX_FORMAT_VERSION,
       derivationVersion: SEARCH_INDEX_DERIVATION_VERSION,
       sourceChecksum: indexed.checksum,
       sourceKind: indexed.sourceKind,
@@ -398,8 +401,7 @@ function parsePersistedSourceIndex(
 ): PersistedSourceSearchIndex | undefined {
   if (!isRecord(value)) return undefined;
   if (
-    value.formatVersion !== SEARCH_INDEX_FORMAT_VERSION
-    || value.derivationVersion !== SEARCH_INDEX_DERIVATION_VERSION
+    value.derivationVersion !== SEARCH_INDEX_DERIVATION_VERSION
     || value.sourceChecksum !== source.checksum
     || value.sourceKind !== source.kind
     || !Array.isArray(value.chunks)
@@ -465,7 +467,6 @@ function parsePersistedSourceIndex(
     });
   }
   return {
-    formatVersion: SEARCH_INDEX_FORMAT_VERSION,
     derivationVersion: SEARCH_INDEX_DERIVATION_VERSION,
     sourceChecksum: source.checksum,
     sourceKind: source.kind,

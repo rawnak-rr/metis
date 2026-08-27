@@ -2,7 +2,6 @@ import { readdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createKernel } from "../../src/kernel.js";
-import { RepairService } from "../../src/repair/service.js";
 import { StudyStore } from "../../src/vault/store.js";
 import {
   fixture,
@@ -42,27 +41,4 @@ describe("vault path boundaries", () => {
     },
   );
 
-  it.skipIf(process.platform === "win32")(
-    "refuses to refresh generated skills through an escaping symlink",
-    async () => {
-      const { root, store } = await fixture();
-      const externalRoot = await temporaryDirectory("metis-skill-external-");
-      await symlink(
-        externalRoot,
-        path.join(root, ".metis", "skills"),
-        "dir",
-      );
-
-      const repairKernel = createKernel(store);
-      const repair = new RepairService(
-        store,
-        repairKernel.knowledgeRepair,
-        repairKernel.wiki,
-      );
-      await expect(repair.repair()).rejects.toThrow(
-        /repair failed.*outside the configured study vault/is,
-      );
-      await expect(readdir(externalRoot)).resolves.toEqual([]);
-    },
-  );
 });

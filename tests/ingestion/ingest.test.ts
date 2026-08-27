@@ -271,7 +271,6 @@ describe("ingestion", () => {
       "utf8",
     )) as Record<string, unknown>;
     expect(derived).toEqual(expect.objectContaining({
-      formatVersion: 2,
       sourceChecksum: ingested.source.checksum,
       method: "pdftotext",
     }));
@@ -1042,46 +1041,6 @@ describe("derived text integrity", () => {
     expect(transcriber.calls).toHaveLength(1);
   });
 
-  it("accepts a pre-checksum transcript so an existing vault keeps its citations", async () => {
-    const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
-    const { root, store, metis } = await fixture(transcriber);
-    await writeFile(path.join(root, "slide.png"), pngBytes());
-    const ingested = await metis.ingestion.ingest({
-      title: "Chlorophyll Slide",
-      sourcePath: "slide.png",
-    });
-    const cachePath = path.join(
-      root,
-      ".metis",
-      "cache",
-      "text-v1",
-      `${ingested.source.checksum}.json`,
-    );
-    const entry = JSON.parse(await readFile(cachePath, "utf8")) as
-      Record<string, unknown>;
-    delete entry.textChecksum;
-    entry.formatVersion = 1;
-    await writeFile(cachePath, `${JSON.stringify(entry)}\n`, "utf8");
-
-    const reopened = createKernel(store, transcriber);
-    await expect(reopened.sources.readSourceText(ingested.source))
-      .resolves.toContain("430 nm");
-
-    // Repair is the boundary that adds the missing checksum.
-    const repaired = await createKernel(store, transcriber)
-      .knowledgeRepair.repairKnowledge({});
-    expect(repaired.derivedText).toEqual(expect.objectContaining({
-      expected: 1,
-      upgraded: 1,
-      missingSourceIds: [],
-    }));
-    const upgraded = JSON.parse(await readFile(cachePath, "utf8")) as
-      Record<string, unknown>;
-    expect(upgraded.formatVersion).toBe(2);
-    expect(upgraded.textChecksum).toBe(sha256(String(upgraded.text)));
-    expect(transcriber.calls).toHaveLength(1);
-  });
-
   it("recovers a PDF derivation from the raw bytes and re-persists it", async () => {
     const { root, store, metis } = await fixture();
     await writeFile(
@@ -1108,64 +1067,7 @@ describe("derived text integrity", () => {
       .resolves.toContain("chemical energy");
     const rewritten = JSON.parse(await readFile(cachePath, "utf8")) as
       Record<string, unknown>;
-    expect(rewritten.formatVersion).toBe(2);
     expect(rewritten.textChecksum).toBe(sha256(String(rewritten.text)));
   });
 
-  it("reports a missing transcript instead of counting it as retained", async () => {
-    const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
-    const { root, store, metis } = await fixture(transcriber);
-    await writeFile(path.join(root, "slide.png"), pngBytes());
-    const ingested = await metis.ingestion.ingest({
-      title: "Chlorophyll Slide",
-      sourcePath: "slide.png",
-    });
-    await rm(path.join(
-      root,
-      ".metis",
-      "cache",
-      "text-v1",
-      `${ingested.source.checksum}.json`,
-    ));
-
-    const repaired = await createKernel(store, transcriber)
-      .knowledgeRepair.repairKnowledge({});
-    expect(repaired.derivedText).toEqual(expect.objectContaining({
-      expected: 1,
-      verified: 0,
-      missingSourceIds: [ingested.source.id],
-    }));
-  });
-
-  it("backs up a transcript and restores it after the cache is lost", async () => {
-    const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
-    const { root, store, metis } = await fixture(transcriber);
-    await writeFile(path.join(root, "slide.png"), pngBytes());
-    const ingested = await metis.ingestion.ingest({
-      title: "Chlorophyll Slide",
-      sourcePath: "slide.png",
-    });
-    const cacheRelative = path.join(
-      ".metis",
-      "cache",
-      "text-v1",
-      `${ingested.source.checksum}.json`,
-    );
-
-    const update = await store.updateVault();
-    const backup = update.backupRelativePath!;
-    await expect(readFile(
-      path.join(root, backup, cacheRelative),
-      "utf8",
-    )).resolves.toContain("430 nm");
-
-    await rm(path.join(root, cacheRelative));
-    const restored = await store.restoreVaultBackup(backup);
-    expect(restored.restored).toBe(true);
-
-    const reopened = createKernel(store, transcriber);
-    await expect(reopened.sources.readSourceText(ingested.source))
-      .resolves.toContain("430 nm");
-    expect(transcriber.calls).toHaveLength(1);
-  });
 });

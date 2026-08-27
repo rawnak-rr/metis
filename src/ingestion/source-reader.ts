@@ -13,14 +13,6 @@ import { StudyStore } from "../vault/store.js";
 import { extractSourceText } from "./extract.js";
 import { defaultVisionTranscriber, type VisionTranscriber } from "./vision.js";
 
-/**
- * Version 2 records a checksum of the derived text itself. Version 1 entries
- * remain readable so an existing vault keeps its transcripts, but they carry no
- * integrity guarantee and `metis_repair` upgrades them in place.
- */
-const DERIVED_TEXT_FORMAT_VERSION = 2 as const;
-const LEGACY_DERIVED_TEXT_FORMAT_VERSION = 1 as const;
-
 function derivedTextRelativePath(checksum: string): string {
   return path.posix.join(DERIVED_TEXT_CACHE_DIRECTORY, `${checksum}.json`);
 }
@@ -87,9 +79,9 @@ export class VerifiedSourceReader {
       if (stored !== undefined) {
         this.sourceTextCache.set(source.id, {
           checksum: source.checksum,
-          text: stored.text,
+          text: stored,
         });
-        return stored.text;
+        return stored;
       }
       if (descriptor.method === "vision") {
         // Re-running the model would produce a different transcript, so every
@@ -97,7 +89,7 @@ export class VerifiedSourceReader {
         // Failing loudly keeps a dead citation distinguishable from a moved one.
         throw new MetisError(
           "DERIVED_TEXT_UNRECOVERABLE",
-          `The stored transcript for '${source.id}' is missing or failed its integrity check, and an image transcript cannot be reproduced. Restore ${DERIVED_TEXT_CACHE_DIRECTORY} from a Metis backup; re-transcribing would move every line citation into this source.`,
+          `The stored transcript for '${source.id}' is missing or failed its integrity check, and an image transcript cannot be reproduced. Restore ${DERIVED_TEXT_CACHE_DIRECTORY} from your own backup; re-transcribing would move every line citation into this source.`,
         );
       }
     }
@@ -130,7 +122,6 @@ export class VerifiedSourceReader {
       await atomicWrite(
         await this.store.resolveForWrite(derivedTextRelativePath(source.checksum)),
         `${JSON.stringify({
-          formatVersion: DERIVED_TEXT_FORMAT_VERSION,
           sourceChecksum: source.checksum,
           textChecksum: sha256(text),
           method: source.extraction.method,
@@ -146,19 +137,14 @@ export class VerifiedSourceReader {
   }
 
   /**
-   * Read stored derived text. A current entry is only returned when the text
-   * matches its own recorded checksum, so a truncated or edited cache file is
-   * indistinguishable from an absent one. A legacy entry predates that checksum
-   * and is returned unverified rather than discarded, because discarding it
-   * would strand the citations that depend on it.
+   * Read stored derived text. An entry is only returned when the text matches
+   * its own recorded checksum, so a truncated or edited cache file is
+   * indistinguishable from an absent one.
    */
-  async readDerivedText(
-    source: SourceRecord,
-  ): Promise<{ text: string; verified: boolean } | undefined> {
+  async readDerivedText(source: SourceRecord): Promise<string | undefined> {
     try {
       const raw = await this.store.readText(derivedTextRelativePath(source.checksum));
       const value = JSON.parse(raw) as {
-        formatVersion?: unknown;
         sourceChecksum?: unknown;
         textChecksum?: unknown;
         method?: unknown;
@@ -168,17 +154,11 @@ export class VerifiedSourceReader {
         value.sourceChecksum !== source.checksum
         || value.method !== source.extraction.method
         || typeof value.text !== "string"
+        || value.textChecksum !== sha256(value.text)
       ) {
         return undefined;
       }
-      if (value.formatVersion === DERIVED_TEXT_FORMAT_VERSION) {
-        if (value.textChecksum !== sha256(value.text)) return undefined;
-        return { text: value.text, verified: true };
-      }
-      if (value.formatVersion === LEGACY_DERIVED_TEXT_FORMAT_VERSION) {
-        return { text: value.text, verified: false };
-      }
-      return undefined;
+      return value.text;
     } catch {
       return undefined;
     }

@@ -4,7 +4,6 @@ import { PACKET_CACHE_DIRECTORY } from "../vault/layout.js";
 import { StudyStore } from "../vault/store.js";
 import { atomicWrite } from "../shared/util.js";
 
-const PACKET_RECORD_FORMAT_VERSION = 1 as const;
 /** Newest packet manifests kept on disk, matching the in-memory ceiling. */
 const MAX_PERSISTED_PACKETS = 32;
 
@@ -41,10 +40,7 @@ export class PacketStore {
     try {
       await atomicWrite(
         await this.store.resolveForWrite(packetRecordRelativePath(record.packetId)),
-        `${JSON.stringify({
-          formatVersion: PACKET_RECORD_FORMAT_VERSION,
-          ...record,
-        })}\n`,
+        `${JSON.stringify(record)}\n`,
       );
       await this.prune();
       return true;
@@ -58,15 +54,13 @@ export class PacketStore {
     try {
       const raw = await this.store.readText(packetRecordRelativePath(packetId));
       const value = JSON.parse(raw) as {
-        formatVersion?: unknown;
         packetId?: unknown;
         groundingMode?: unknown;
         citations?: unknown;
         createdAt?: unknown;
       };
       if (
-        value.formatVersion !== PACKET_RECORD_FORMAT_VERSION
-        || value.packetId !== packetId
+        value.packetId !== packetId
         || typeof value.groundingMode !== "string"
         || typeof value.createdAt !== "string"
         || !Array.isArray(value.citations)

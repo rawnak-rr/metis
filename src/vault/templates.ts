@@ -5,19 +5,17 @@ import type {
 } from "../contracts/types.js";
 import { describeExtraction } from "../contracts/source-types.js";
 import { nowIso, yamlString } from "../shared/util.js";
-import { GENERATED_WIKI_FORMAT_VERSION } from "./layout.js";
 
 /**
  * The exact text of every file Metis generates inside a vault.
  *
- * Repair compares a generated file against what these produce to decide whether
- * it is current, so the templates and that check have to be reading the same
- * thing. Nothing here touches the filesystem.
+ * A generated file carries `metis_generated: true` so a reader can tell it apart
+ * from prose they wrote themselves. Nothing here touches the filesystem.
  */
 export function sourcePageText(source: SourceRecord, preview: string): string {
   return [
     "---",
-    `metis_generated: ${GENERATED_WIKI_FORMAT_VERSION}`,
+    `metis_generated: true`,
     `id: ${yamlString(source.id)}`,
     `title: ${yamlString(source.title)}`,
     `type: "source"`,
@@ -49,7 +47,7 @@ export function sourcePageText(source: SourceRecord, preview: string): string {
 export function wikiPageText(page: WikiPageRecord, markdown: string): string {
   const frontmatter = [
     "---",
-    `metis_generated: ${GENERATED_WIKI_FORMAT_VERSION}`,
+    `metis_generated: true`,
     `title: ${yamlString(page.title)}`,
     `summary: ${yamlString(page.summary)}`,
     `aliases: [${page.aliases.map(yamlString).join(", ")}]`,
@@ -117,7 +115,7 @@ This vault separates evidence from synthesis so its knowledge stays inspectable.
 2. \`wiki/sources/\` contains provenance pages generated from raw sources.
 3. \`wiki/concepts/\` contains compiled, cross-linked explanations maintained through the MCP.
 4. \`wiki/index.md\` is the content map. \`wiki/log.md\` is the append-only operation timeline.
-5. \`.metis/\` contains portable machine state: the source, wiki page, and concept records, the derived-text and search caches, and managed backups.
+5. \`.metis/\` contains portable machine state: the source, wiki page, and concept records, and the derived-text and search caches.
 
 ## Concept page contract
 

@@ -4,7 +4,6 @@ import { IngestService } from "./ingestion/service.js";
 import { CitationResolver } from "./search/citations.js";
 import { SearchService } from "./search/service.js";
 import { WikiService } from "./synthesis/wiki.js";
-import { KnowledgeRepair } from "./repair/knowledge.js";
 import type { VisionTranscriber } from "./ingestion/vision.js";
 
 export interface MetisKernel {
@@ -15,17 +14,15 @@ export interface MetisKernel {
   search: SearchService;
   citations: CitationResolver;
   wiki: WikiService;
-  knowledgeRepair: KnowledgeRepair;
 }
 
 /**
  * Wires the kernel's services over one vault.
  *
- * The wiring is the whole design in ten lines: one reader holds the text cache
- * and the checksum guarantee, search implements the index port that ingestion
- * declares, and repair sits above everything because it rebuilds what the rest
- * derive. Nothing here decides policy, so a consumer that needs only part of
- * the kernel can construct that part directly instead.
+ * The wiring is the whole design in eight lines: one reader holds the text
+ * cache and the checksum guarantee, and search implements the index port that
+ * ingestion declares. Nothing here decides policy, so a consumer that needs
+ * only part of the kernel can construct that part directly instead.
  */
 export function createKernel(
   store: StudyStore,
@@ -38,6 +35,5 @@ export function createKernel(
   const ingestion = new IngestService(store, sources, search);
   const citations = new CitationResolver(store, sources);
   const wiki = new WikiService(store, sources);
-  const knowledgeRepair = new KnowledgeRepair(store, sources, search, wiki);
-  return { store, sources, ingestion, search, citations, wiki, knowledgeRepair };
+  return { store, sources, ingestion, search, citations, wiki };
 }

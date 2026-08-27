@@ -13,7 +13,6 @@ import type { WikiLintResult } from "../synthesis/wiki.js";
 import { GroundingService } from "../grounding/service.js";
 import { PacketStore } from "../grounding/packets.js";
 import { GROUNDING_POLICY } from "../grounding/policy.js";
-import { RepairService } from "../repair/service.js";
 import { samplingEntailmentJudge } from "./sampling.js";
 import { groundingModeSchema, type GroundingMode } from "../contracts/schema.js";
 import { StudyStore } from "../vault/store.js";
@@ -28,7 +27,6 @@ export interface StudyServer {
   store: StudyStore;
   kernel: MetisKernel;
   grounding: GroundingService;
-  repair: RepairService;
 }
 
 export async function createStudyServer(
@@ -43,7 +41,6 @@ export async function createStudyServer(
     kernel.search,
     new PacketStore(store),
   );
-  const repair = new RepairService(store, kernel.knowledgeRepair, kernel.wiki);
   const server = new McpServer({
     name: "metis",
     version: METIS_VERSION,
@@ -61,7 +58,6 @@ export async function createStudyServer(
       "Facet statuses are conservative lexical routing signals, not entailment: answer supported facets, qualify partially_supported ones, leave unsupported ones unfilled under the mode, and explicitly compare conflicting or possible_numeric_conflict evidence.",
       "An excerpt marked lexicalSupport 'related', or listed in a facet's borderlineCitations, is in the packet on retrieval relevance alone because the lexical check could not confirm it; read it and judge it yourself instead of relying on the facet status.",
       "A facet carrying statusMethod 'entailment' was judged by sampling this client's model rather than by token coverage, so its citations name the passages that actually answered it.",
-      "For 'Metis repair' or a vault update, call metis_repair; it migrates schemas, repairs generated knowledge from verified raw evidence, refreshes skills, and incrementally synchronizes indexes.",
     ].join(" "),
   });
 
@@ -71,8 +67,8 @@ export async function createStudyServer(
 
   registerResources(server, store, kernel);
   registerPrompts(server);
-  registerTools(server, store, kernel, grounding, repair);
-  return { server, store, kernel, grounding, repair };
+  registerTools(server, store, kernel, grounding);
+  return { server, store, kernel, grounding };
 }
 
 function registerResources(server: McpServer, store: StudyStore, kernel: MetisKernel): void {
@@ -153,7 +149,7 @@ function registerResources(server: McpServer, store: StudyStore, kernel: MetisKe
     }),
     {
       title: "Full wiki Markdown for explicit maintenance",
-      description: "Complete generated Markdown for repair or deliberate editing. Do not load during ordinary study.",
+      description: "Complete generated Markdown for deliberate editing. Do not load during ordinary study.",
       mimeType: "text/markdown",
     },
     async (uri, variables) => {
@@ -244,7 +240,6 @@ function registerTools(
   store: StudyStore,
   kernel: MetisKernel,
   grounding: GroundingService,
-  repair: RepairService,
 ): void {
   server.registerTool(
     "configure_study_vault",
@@ -262,59 +257,6 @@ function registerTools(
       return jsonResult({
         name: config.name,
         groundingDefault: config.groundingDefault,
-      });
-    },
-  );
-
-  server.registerTool(
-    "metis_repair",
-    {
-      description: "Migrate and repair the whole vault with a verified backup, refreshed skills, and incremental or full knowledge rebuilding.",
-      inputSchema: {
-        dryRun: z.boolean().default(false),
-        knowledgeMode: z.enum(["incremental", "full"]).default("incremental"),
-      },
-      annotations: writeAnnotations(false, true),
-    },
-    async ({ dryRun, knowledgeMode }) => {
-      const result = await repair.repair({ dryRun, mode: knowledgeMode });
-      const { wikiHealth, ...compact } = result;
-      return jsonResult({
-        ...compact,
-        ...(wikiHealth ? { wikiHealth: boundedWikiHealth(wikiHealth) } : {}),
-      });
-    },
-  );
-
-  server.registerTool(
-    "metis_restore_backup",
-    {
-      description: "Preview or restore a verified managed-file backup without changing raw sources.",
-      inputSchema: {
-        backupRelativePath: z.string().min(1).describe("Direct backup path returned by metis_repair, such as .metis/backups/2026-..."),
-        dryRun: z.boolean().default(false),
-      },
-      annotations: writeAnnotations(false, true),
-    },
-    async ({ backupRelativePath, dryRun }) =>
-      jsonResult(await store.restoreVaultBackup(backupRelativePath, { dryRun })),
-  );
-
-  server.registerTool(
-    "list_metis_backups",
-    {
-      description: "List and checksum-verify managed-file backups newest first.",
-      inputSchema: {
-        limit: z.number().int().min(1).max(50).default(10),
-      },
-      annotations: readAnnotations(),
-    },
-    async ({ limit }) => {
-      const backups = await store.listVaultBackups();
-      return jsonResult({
-        backups: backups.slice(0, limit),
-        total: backups.length,
-        more: backups.length > limit,
       });
     },
   );
