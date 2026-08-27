@@ -7,17 +7,17 @@ import {
   KnowledgeService,
   compactConceptCapsule,
   type WikiLintResult,
-} from "./knowledge.js";
-import { errorPayload } from "./errors.js";
-import { SUPPORTED_SOURCE_EXTENSIONS } from "./extract.js";
-import { GroundingService } from "./grounding.js";
-import { GROUNDING_POLICY } from "./policy.js";
-import { RepairService } from "./repair.js";
+} from "../ingestion/knowledge.js";
+import { errorPayload } from "../shared/errors.js";
+import { SUPPORTED_SOURCE_EXTENSIONS } from "../ingestion/extract.js";
+import { GroundingService } from "../grounding/service.js";
+import { GROUNDING_POLICY } from "../grounding/policy.js";
+import { RepairService } from "../repair/service.js";
 import { samplingEntailmentJudge } from "./sampling.js";
-import { groundingModeSchema, type GroundingMode } from "./schema.js";
-import { StudyStore } from "./store.js";
-import type { VisionTranscriber } from "./vision.js";
-import { METIS_VERSION } from "./version.js";
+import { groundingModeSchema, type GroundingMode } from "../contracts/schema.js";
+import { StudyStore } from "../vault/store.js";
+import type { VisionTranscriber } from "../ingestion/vision.js";
+import { METIS_VERSION } from "../shared/version.js";
 
 const searchScopeSchema = z.enum(["all", "sources", "wiki"]);
 const RESOURCE_LOG_TAIL_CHARACTERS = 3_000;

@@ -5,7 +5,7 @@ import {
   lexicalSupportTokens,
   splitClaimUnits,
   type ClaimUnit,
-} from "../src/claims.js";
+} from "../../src/synthesis/claims.js";
 
 describe("splitClaimUnits", () => {
   it("splits sentences while preserving abbreviations, decimals, and initials", () => {

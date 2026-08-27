@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { MetisError } from "./errors.js";
-import type { ExtractionMethod, SourceRecord } from "./types.js";
-import { messageOf } from "./util.js";
+import { MetisError } from "../shared/errors.js";
+import type { ExtractionMethod, SourceRecord } from "../contracts/types.js";
+import { messageOf } from "../shared/util.js";
 import {
   MAX_VISION_IMAGE_BYTES,
   type ImageMediaType,

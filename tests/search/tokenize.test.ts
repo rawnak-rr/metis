@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { lexicalSupportTokens, stemSupport } from "../src/knowledge.js";
-import { stemSearch, tokenize, tokenizeRaw } from "../src/retrieval.js";
+import { lexicalSupportTokens, stemSupport } from "../../src/ingestion/knowledge.js";
+import { stemSearch, tokenize, tokenizeRaw } from "../../src/search/retrieval.js";
 
 describe("tokenizeRaw", () => {
   it("splits words without stemming or stopword removal", () => {

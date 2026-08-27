@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CreateMessageRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { createStudyServer } from "../src/server.js";
+import { createStudyServer } from "../../src/mcp/server.js";
 
 const roots: string[] = [];
 

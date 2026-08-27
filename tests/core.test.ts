@@ -4,12 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { KnowledgeService } from "../src/knowledge.js";
-import { GroundingService } from "../src/grounding.js";
-import type { EntailmentRequest, EntailmentVerdict } from "../src/entailment.js";
-import { RepairService } from "../src/repair.js";
-import { syncMetisSkills } from "../src/skills.js";
-import { StudyStore } from "../src/store.js";
+import { KnowledgeService } from "../src/ingestion/knowledge.js";
+import { GroundingService } from "../src/grounding/service.js";
+import type { EntailmentRequest, EntailmentVerdict } from "../src/grounding/entailment.js";
+import { RepairService } from "../src/repair/service.js";
+import { syncMetisSkills } from "../src/repair/skills.js";
+import { StudyStore } from "../src/vault/store.js";
 
 const temporaryDirectories: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -1174,7 +1174,7 @@ describe("repair CLI", () => {
   it("runs the same dry-run and repair workflow without an MCP client", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "metis-cli-test-"));
     temporaryDirectories.push(root);
-    const entry = path.resolve("src", "index.ts");
+    const entry = path.resolve("src", "cli", "index.ts");
     const previewRun = await execFileAsync(process.execPath, [
       "--import",
       "tsx",

@@ -9,7 +9,7 @@ import {
   type StudyConfig,
   type StudyState,
 } from "./schema.js";
-import { nowIso, sha256 } from "./util.js";
+import { nowIso, sha256 } from "../shared/util.js";
 
 type JsonObject = Record<string, unknown>;
 type Migration = (value: JsonObject) => JsonObject;

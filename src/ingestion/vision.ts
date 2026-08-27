@@ -1,7 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { MetisError } from "./errors.js";
-import type { ImageMediaType } from "./types.js";
-import { messageOf } from "./util.js";
+import { MetisError } from "../shared/errors.js";
+import type { ImageMediaType } from "../contracts/types.js";
+import { messageOf } from "../shared/util.js";
 
 export type { ImageMediaType };
 

@@ -6,7 +6,7 @@ import {
   type EntailmentJudge,
   type EntailmentRequest,
   type EntailmentVerdicts,
-} from "./entailment.js";
+} from "../grounding/entailment.js";
 
 const SAMPLING_TIMEOUT_MILLISECONDS = 12_000;
 const SAMPLING_MAX_TOKENS = 120;

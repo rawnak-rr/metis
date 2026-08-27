@@ -21,16 +21,16 @@ import type {
   StudyConfig,
   StudyState,
   WikiPageRecord,
-} from "./types.js";
-import { describeExtraction } from "./extract.js";
-import { migrateConfig, migrateState } from "./migrations.js";
+} from "../contracts/types.js";
+import { describeExtraction } from "../ingestion/extract.js";
+import { migrateConfig, migrateState } from "../contracts/migrations.js";
 import {
   CURRENT_CONFIG_SCHEMA_VERSION,
   CURRENT_STATE_SCHEMA_VERSION,
   parseStudyConfig,
   parseStudyState,
   schemaVersionOf,
-} from "./schema.js";
+} from "../contracts/schema.js";
 import {
   atomicWrite,
   clamp,
@@ -42,7 +42,7 @@ import {
   sha256,
   stripFrontmatter,
   yamlString,
-} from "./util.js";
+} from "../shared/util.js";
 
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 10_000;

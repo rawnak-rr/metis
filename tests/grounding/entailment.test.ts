@@ -3,7 +3,7 @@ import {
   ENTAILMENT_SYSTEM_PROMPT,
   entailmentPrompt,
   parseEntailmentVerdicts,
-} from "../src/entailment.js";
+} from "../../src/grounding/entailment.js";
 
 const passages = [
   { citation: "[src_a#L1-L1]", text: "First passage." },

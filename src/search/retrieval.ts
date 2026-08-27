@@ -1,5 +1,5 @@
-import type { SearchChunk, SourceRecord } from "./types.js";
-import { sha256, unique } from "./util.js";
+import type { SearchChunk, SourceRecord } from "../contracts/types.js";
+import { sha256, unique } from "../shared/util.js";
 
 export const SEARCH_INDEX_FORMAT_VERSION = 1 as const;
 export const SEARCH_INDEX_DERIVATION_VERSION = [

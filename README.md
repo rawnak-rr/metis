@@ -91,7 +91,7 @@ Use the following shape in clients that accept an MCP JSON configuration. Replac
   "mcpServers": {
     "metis": {
       "command": "node",
-      "args": ["/absolute/path/to/metis/dist/src/index.js"],
+      "args": ["/absolute/path/to/metis/dist/src/cli/index.js"],
       "env": {
         "METIS_VAULT_PATH": "/absolute/path/to/Obsidian Vault"
       }

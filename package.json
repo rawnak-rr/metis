@@ -4,7 +4,7 @@
   "description": "A local-first MCP grounding kernel: immutable sources, checksum-verified retrieval, and bounded evidence packets over a persistent wiki.",
   "type": "module",
   "bin": {
-    "metis": "dist/src/index.js"
+    "metis": "dist/src/cli/index.js"
   },
   "files": [
     "dist/src",
@@ -14,10 +14,10 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/src/index.js",
-    "repair": "node dist/src/index.js repair",
-    "dev": "tsx src/index.ts",
-    "inspector": "npx @modelcontextprotocol/inspector tsx src/index.ts",
+    "start": "node dist/src/cli/index.js",
+    "repair": "node dist/src/cli/index.js repair",
+    "dev": "tsx src/cli/index.ts",
+    "inspector": "npx @modelcontextprotocol/inspector tsx src/cli/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",

@@ -9,13 +9,13 @@ import type {
   SourceRecord,
   StudyState,
   WikiPageRecord,
-} from "./types.js";
+} from "../contracts/types.js";
 import {
   DERIVED_TEXT_CACHE_DIRECTORY,
   GENERATED_WIKI_FORMAT_VERSION,
   SEARCH_INDEX_CACHE_DIRECTORY,
   StudyStore,
-} from "./store.js";
+} from "../vault/store.js";
 import {
   atomicWrite,
   messageOf,
@@ -26,14 +26,14 @@ import {
   slugify,
   stripFrontmatter,
   unique,
-} from "./util.js";
+} from "../shared/util.js";
 import {
   IncrementalBm25Index,
   rehydrateChunkText,
   supportFingerprint,
   tokenize,
   type RankedIndexedChunk,
-} from "./retrieval.js";
+} from "../search/retrieval.js";
 import {
   WIKI_CITATION_PATTERN,
   assessClaim,
@@ -41,8 +41,8 @@ import {
   splitClaimUnits,
   stripCitationAndMarkdownSyntax,
   type ClaimAssessment,
-} from "./claims.js";
-import { MetisError, errorPayload, type MetisErrorPayload } from "./errors.js";
+} from "../synthesis/claims.js";
+import { MetisError, errorPayload, type MetisErrorPayload } from "../shared/errors.js";
 import {
   SUPPORTED_SOURCE_EXTENSIONS,
   describeExtraction,
@@ -55,8 +55,8 @@ import {
 } from "./extract.js";
 import { defaultVisionTranscriber, type VisionTranscriber } from "./vision.js";
 
-export { tokenize } from "./retrieval.js";
-export { lexicalSupportTokens, stemSupport } from "./claims.js";
+export { tokenize } from "../search/retrieval.js";
+export { lexicalSupportTokens, stemSupport } from "../synthesis/claims.js";
 
 /**
  * Version 2 records a checksum of the derived text itself. Version 1 entries

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { KnowledgeService, type KnowledgeRepairMode } from "./knowledge.js";
-import { RepairService } from "./repair.js";
-import { createStudyServer } from "./server.js";
-import { StudyStore } from "./store.js";
-import { METIS_VERSION } from "./version.js";
+import { KnowledgeService, type KnowledgeRepairMode } from "../ingestion/knowledge.js";
+import { RepairService } from "../repair/service.js";
+import { createStudyServer } from "../mcp/server.js";
+import { StudyStore } from "../vault/store.js";
+import { METIS_VERSION } from "../shared/version.js";
 
 async function main(): Promise<void> {
   const command = process.argv[2];

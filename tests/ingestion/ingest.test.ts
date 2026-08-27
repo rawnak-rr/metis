@@ -6,21 +6,21 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { MetisError, type MetisErrorCode } from "../src/errors.js";
+import { MetisError, type MetisErrorCode } from "../../src/shared/errors.js";
 import {
   extractLatexText,
   extractMarkdownText,
   normalizeText,
-} from "../src/extract.js";
-import { KnowledgeService } from "../src/knowledge.js";
-import { createStudyServer } from "../src/server.js";
-import { StudyStore } from "../src/store.js";
-import { sha256 } from "../src/util.js";
+} from "../../src/ingestion/extract.js";
+import { KnowledgeService } from "../../src/ingestion/knowledge.js";
+import { createStudyServer } from "../../src/mcp/server.js";
+import { StudyStore } from "../../src/vault/store.js";
+import { sha256 } from "../../src/shared/util.js";
 import {
   AnthropicVisionTranscriber,
   CHEAPEST_VISION_MODEL,
   type VisionTranscriber,
-} from "../src/vision.js";
+} from "../../src/ingestion/vision.js";
 
 const temporaryDirectories: string[] = [];
 

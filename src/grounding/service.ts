@@ -4,22 +4,22 @@ import type {
   EvidenceExcerpt,
   GroundingMode,
   SearchChunk,
-} from "./types.js";
+} from "../contracts/types.js";
 import {
   KnowledgeService,
   compactConceptCapsule,
   tokenize,
   type RetrievalSession,
-} from "./knowledge.js";
+} from "../ingestion/knowledge.js";
 import {
   MAX_JUDGED_PASSAGES,
   type EntailmentJudge,
   type EntailmentRequest,
   type EntailmentVerdicts,
 } from "./entailment.js";
-import { StudyStore } from "./store.js";
-import { groundingModeSchema } from "./schema.js";
-import { newId, nowIso, unique } from "./util.js";
+import { StudyStore } from "../vault/store.js";
+import { groundingModeSchema } from "../contracts/schema.js";
+import { newId, nowIso, unique } from "../shared/util.js";
 
 const MAX_REUSABLE_CITATIONS = 18;
 const MAX_ANSWER_FACETS = 5;

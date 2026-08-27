@@ -3,20 +3,20 @@ import {
   type KnowledgeRepairMode,
   type KnowledgeRepairResult,
   type WikiLintResult,
-} from "./knowledge.js";
-import { SEARCH_INDEX_DERIVATION_VERSION } from "./retrieval.js";
+} from "../ingestion/knowledge.js";
+import { SEARCH_INDEX_DERIVATION_VERSION } from "../search/retrieval.js";
 import {
   CURRENT_CONFIG_SCHEMA_VERSION,
   CURRENT_STATE_SCHEMA_VERSION,
-} from "./schema.js";
+} from "../contracts/schema.js";
 import {
   METIS_SKILL_BUNDLE_VERSION,
   syncMetisSkills,
   type SkillSyncResult,
 } from "./skills.js";
-import { StudyStore, type VaultUpdateResult } from "./store.js";
-import { atomicWrite, messageOf, nowIso, sha256 } from "./util.js";
-import { METIS_VERSION } from "./version.js";
+import { StudyStore, type VaultUpdateResult } from "../vault/store.js";
+import { atomicWrite, messageOf, nowIso, sha256 } from "../shared/util.js";
+import { METIS_VERSION } from "../shared/version.js";
 
 export interface VaultRepairResult {
   metisVersion: string;

@@ -1,5 +1,5 @@
-import { isStopWord, tokenizeRaw } from "./retrieval.js";
-import { unique } from "./util.js";
+import { isStopWord, tokenizeRaw } from "../search/retrieval.js";
+import { unique } from "../shared/util.js";
 
 export const WIKI_CITATION_PATTERN = /\[([A-Za-z0-9_-]+)#L(\d+)-L(\d+)\]/g;
 const GENERIC_SUPPORT_WORDS = new Set([

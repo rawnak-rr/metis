@@ -1,10 +1,10 @@
 import { mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
-import { CURRENT_CONFIG_SCHEMA_VERSION, CURRENT_STATE_SCHEMA_VERSION } from "./schema.js";
-import { StudyStore } from "./store.js";
-import { GROUNDING_POLICY } from "./policy.js";
-import { atomicWrite, isNodeError, sha256 } from "./util.js";
-import { METIS_VERSION } from "./version.js";
+import { CURRENT_CONFIG_SCHEMA_VERSION, CURRENT_STATE_SCHEMA_VERSION } from "../contracts/schema.js";
+import { StudyStore } from "../vault/store.js";
+import { GROUNDING_POLICY } from "../grounding/policy.js";
+import { atomicWrite, isNodeError, sha256 } from "../shared/util.js";
+import { METIS_VERSION } from "../shared/version.js";
 
 export const METIS_SKILL_BUNDLE_VERSION = 1 as const;
 
