@@ -12,7 +12,7 @@ import {
   extractMarkdownText,
   normalizeText,
 } from "../../src/ingestion/extract.js";
-import { KnowledgeService } from "../../src/ingestion/knowledge.js";
+import { createKernel } from "../../src/kernel.js";
 import { createStudyServer } from "../../src/mcp/server.js";
 import { StudyStore } from "../../src/vault/store.js";
 import { sha256 } from "../../src/shared/util.js";
@@ -51,8 +51,8 @@ async function fixture(vision?: VisionTranscriber) {
   temporaryDirectories.push(root);
   const store = new StudyStore(root);
   await store.initialize("Ingest Vault");
-  const knowledge = new KnowledgeService(store, vision);
-  return { root, store, knowledge };
+  const metis = createKernel(store, vision);
+  return { root, store, metis };
 }
 
 /** One-pixel PNG; the stub transcriber never decodes it. */
@@ -185,7 +185,7 @@ describe("text extraction", () => {
 
 describe("ingestion", () => {
   it("cites Markdown body lines at their raw-file line numbers", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await writeFile(
       path.join(root, "notes.md"),
       [
@@ -199,7 +199,7 @@ describe("ingestion", () => {
       "utf8",
     );
 
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Photosynthesis Notes",
       sourcePath: "notes.md",
     });
@@ -207,7 +207,7 @@ describe("ingestion", () => {
     expect(ingested.source.kind).toBe("markdown");
     expect(ingested.source.extraction).toEqual({ method: "markdown" });
     // Line 5 of the raw file is line 5 of the extracted text.
-    await expect(knowledge.upsertWikiPage({
+    await expect(metis.wiki.upsertWikiPage({
       title: "Photosynthesis",
       summary: "Light energy becomes chemical energy.",
       markdown: `# Photosynthesis\n\nPhotosynthesis converts light energy into chemical energy. [${ingested.source.id}#L5-L5]`,
@@ -216,7 +216,7 @@ describe("ingestion", () => {
   });
 
   it("indexes LaTeX prose and never indexes its preamble or comments", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await writeFile(
       path.join(root, "paper.tex"),
       [
@@ -231,32 +231,32 @@ describe("ingestion", () => {
       "utf8",
     );
 
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Respiration Paper",
       sourcePath: "paper.tex",
     });
 
     expect(ingested.source.kind).toBe("latex");
     expect(ingested.source.extraction.method).toBe("latex");
-    const text = await knowledge.readSourceText(ingested.source);
+    const text = await metis.sources.readSourceText(ingested.source);
     expect(text).toContain("Mitochondria produce ATP");
     expect(text).not.toContain("secretcommentmarker");
     expect(text).not.toContain("unlikelypackagename");
-    expect(await knowledge.search("secretcommentmarker")).toEqual([]);
-    expect(await knowledge.search("mitochondria respiration"))
+    expect(await metis.search.search("secretcommentmarker")).toEqual([]);
+    expect(await metis.search.search("mitochondria respiration"))
       .toEqual(expect.arrayContaining([
         expect.objectContaining({ documentId: ingested.source.id }),
       ]));
   });
 
   it("extracts PDF text once and reuses the persisted derivation", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await writeFile(
       path.join(root, "paper.pdf"),
       pdfBytes("Photosynthesis converts light energy into chemical energy."),
     );
 
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Photosynthesis Paper",
       sourcePath: "paper.pdf",
     });
@@ -280,10 +280,10 @@ describe("ingestion", () => {
   });
 
   it("reports a coded failure for a file that pdftotext cannot read", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await writeFile(path.join(root, "broken.pdf"), "This is not really a PDF.", "utf8");
 
-    expect(await ingestCode(() => knowledge.ingest({
+    expect(await ingestCode(() => metis.ingestion.ingest({
       title: "Broken PDF",
       sourcePath: "broken.pdf",
     }))).toBe("EXTRACT_PDF_FAILED");
@@ -296,10 +296,10 @@ describe("image ingestion", () => {
     const transcriber = new StubTranscriber(
       "Figure 1: Chlorophyll absorbs red and blue light.\nAbsorption peaks near 430 nm.",
     );
-    const { root, knowledge } = await fixture(transcriber);
+    const { root, metis } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.png"), pngBytes());
 
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Chlorophyll Slide",
       sourcePath: "slide.png",
       tags: ["biology"],
@@ -316,7 +316,7 @@ describe("image ingestion", () => {
       model: CHEAPEST_VISION_MODEL,
     }));
     expect(ingested.preview).toContain("Chlorophyll absorbs red and blue light");
-    expect(await knowledge.search("chlorophyll absorption"))
+    expect(await metis.search.search("chlorophyll absorption"))
       .toEqual(expect.arrayContaining([
         expect.objectContaining({ documentId: ingested.source.id }),
       ]));
@@ -330,17 +330,17 @@ describe("image ingestion", () => {
     const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
     const { root, store } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.png"), pngBytes());
-    const first = new KnowledgeService(store, transcriber);
-    const ingested = await first.ingest({
+    const first = createKernel(store, transcriber);
+    const ingested = await first.ingestion.ingest({
       title: "Chlorophyll Slide",
       sourcePath: "slide.png",
     });
 
     // A duplicate ingestion, and a fresh process reading the same source, both
     // reuse the persisted transcript rather than paying for the model again.
-    await first.ingest({ title: "Same Slide", sourcePath: "slide.png" });
-    const reopened = new KnowledgeService(store, transcriber);
-    const text = await reopened.readSourceText(ingested.source);
+    await first.ingestion.ingest({ title: "Same Slide", sourcePath: "slide.png" });
+    const reopened = createKernel(store, transcriber);
+    const text = await reopened.sources.readSourceText(ingested.source);
 
     expect(text).toContain("430 nm");
     expect(transcriber.calls).toHaveLength(1);
@@ -348,10 +348,10 @@ describe("image ingestion", () => {
 
   it("records the model override from METIS_VISION_MODEL provenance", async () => {
     const transcriber = new StubTranscriber("Transcribed slide text.");
-    const { root, knowledge } = await fixture(transcriber);
+    const { root, metis } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.jpg"), pngBytes());
 
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Slide",
       sourcePath: "slide.jpg",
     });
@@ -365,10 +365,10 @@ describe("image ingestion", () => {
       "EXTRACT_VISION_RATE_LIMITED",
       "rate limited",
     ));
-    const { root, knowledge, store } = await fixture(transcriber);
+    const { root, metis, store } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.png"), pngBytes());
 
-    expect(await ingestCode(() => knowledge.ingest({
+    expect(await ingestCode(() => metis.ingestion.ingest({
       title: "Chlorophyll Slide",
       sourcePath: "slide.png",
     }))).toBe("EXTRACT_VISION_RATE_LIMITED");
@@ -379,13 +379,13 @@ describe("image ingestion", () => {
 
   it("abandons ingestion when a transcript cannot be persisted", async () => {
     const transcriber = new StubTranscriber("Chlorophyll absorbs red and blue light.");
-    const { root, knowledge, store } = await fixture(transcriber);
+    const { root, metis, store } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.png"), pngBytes());
     const cacheDirectory = path.join(root, ".metis", "cache", "text-v1");
     await chmod(cacheDirectory, 0o500);
 
     try {
-      expect(await ingestCode(() => knowledge.ingest({
+      expect(await ingestCode(() => metis.ingestion.ingest({
         title: "Chlorophyll Slide",
         sourcePath: "slide.png",
       }))).toBe("INGEST_COMMIT_FAILED");
@@ -398,10 +398,10 @@ describe("image ingestion", () => {
 
   it("rejects an image above the vision size limit before calling the model", async () => {
     const transcriber = new StubTranscriber("unused");
-    const { root, knowledge } = await fixture(transcriber);
+    const { root, metis } = await fixture(transcriber);
     await writeFile(path.join(root, "huge.png"), pngBytes(6 * 1024 * 1024));
 
-    expect(await ingestCode(() => knowledge.ingest({
+    expect(await ingestCode(() => metis.ingestion.ingest({
       title: "Huge Slide",
       sourcePath: "huge.png",
     }))).toBe("INGEST_SOURCE_TOO_LARGE");
@@ -412,7 +412,7 @@ describe("image ingestion", () => {
 
 describe("batch ingestion", () => {
   it("classifies every file in a directory and commits once", async () => {
-    const { root, store, knowledge } = await fixture();
+    const { root, store, metis } = await fixture();
     await mkdir(path.join(root, "inbox"), { recursive: true });
     await writeFile(path.join(root, "inbox", "chain-rule.md"), "The chain rule differentiates a composition.\n", "utf8");
     await writeFile(path.join(root, "inbox", "learning-rate.txt"), "The learning rate sets the step size.\n", "utf8");
@@ -420,7 +420,7 @@ describe("batch ingestion", () => {
     await writeFile(path.join(root, "inbox", "slides.key"), "unsupported", "utf8");
     await writeFile(path.join(root, "inbox", "broken.txt"), Buffer.from([0x48, 0x69, 0xff, 0xfe]));
 
-    const result = await knowledge.ingestMany({ directory: "inbox" });
+    const result = await metis.ingestion.ingestMany({ directory: "inbox" });
 
     expect(result.requested).toBe(4);
     expect(result.ingested).toBe(2);
@@ -453,12 +453,12 @@ describe("batch ingestion", () => {
   });
 
   it("resolves a byte-identical file in the same batch to the first record", async () => {
-    const { root, store, knowledge } = await fixture();
+    const { root, store, metis } = await fixture();
     await mkdir(path.join(root, "dupes"), { recursive: true });
     await writeFile(path.join(root, "dupes", "a.md"), "Identical evidence.\n", "utf8");
     await writeFile(path.join(root, "dupes", "b.md"), "Identical evidence.\n", "utf8");
 
-    const result = await knowledge.ingestMany({ directory: "dupes" });
+    const result = await metis.ingestion.ingestMany({ directory: "dupes" });
 
     expect(result.ingested).toBe(1);
     expect(result.duplicates).toBe(1);
@@ -471,11 +471,11 @@ describe("batch ingestion", () => {
   });
 
   it("never ingests Metis's own generated output when scanning the vault root", async () => {
-    const { root, knowledge } = await fixture();
-    await knowledge.ingest({ title: "Seed", content: "Seed evidence for the wiki.\n" });
+    const { root, metis } = await fixture();
+    await metis.ingestion.ingest({ title: "Seed", content: "Seed evidence for the wiki.\n" });
     await writeFile(path.join(root, "fresh.md"), "Fresh evidence at the vault root.\n", "utf8");
 
-    const result = await knowledge.ingestMany({ directory: ".", recursive: true });
+    const result = await metis.ingestion.ingestMany({ directory: ".", recursive: true });
 
     expect(result.items.map((item) => item.sourcePath)).toEqual(["fresh.md"]);
     expect(result.items.every((item) => !item.sourcePath.startsWith("raw/"))).toBe(true);
@@ -483,16 +483,16 @@ describe("batch ingestion", () => {
   });
 
   it("scans subdirectories only when asked and honours an extension filter", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await mkdir(path.join(root, "deep", "nested"), { recursive: true });
     await writeFile(path.join(root, "deep", "top.md"), "Top level evidence.\n", "utf8");
     await writeFile(path.join(root, "deep", "notes.txt"), "Plain text evidence.\n", "utf8");
     await writeFile(path.join(root, "deep", "nested", "inner.md"), "Nested evidence.\n", "utf8");
 
-    const shallow = await knowledge.ingestMany({ directory: "deep", extensions: ["md"] });
+    const shallow = await metis.ingestion.ingestMany({ directory: "deep", extensions: ["md"] });
     expect(shallow.items.map((item) => item.sourcePath)).toEqual(["deep/top.md"]);
 
-    const deep = await knowledge.ingestMany({ directory: "deep", recursive: true });
+    const deep = await metis.ingestion.ingestMany({ directory: "deep", recursive: true });
     expect(deep.items.map((item) => item.sourcePath).sort())
       .toEqual(["deep/nested/inner.md", "deep/notes.txt", "deep/top.md"]);
     // The already-ingested file resolves as a duplicate rather than a second record.
@@ -501,15 +501,15 @@ describe("batch ingestion", () => {
   });
 
   it("makes every batched source immediately searchable and tagged", async () => {
-    const { root, store, knowledge } = await fixture();
+    const { root, store, metis } = await fixture();
     await mkdir(path.join(root, "corpus"), { recursive: true });
     await writeFile(path.join(root, "corpus", "gradient-descent.md"), "Gradient descent follows the negative gradient.\n", "utf8");
     await writeFile(path.join(root, "corpus", "bayes.md"), "Bayes theorem updates a prior into a posterior.\n", "utf8");
 
-    const result = await knowledge.ingestMany({ directory: "corpus", tags: ["batch"] });
+    const result = await metis.ingestion.ingestMany({ directory: "corpus", tags: ["batch"] });
     const bayes = result.items.find((item) => item.sourcePath.endsWith("bayes.md"));
 
-    expect(await knowledge.search("posterior prior"))
+    expect(await metis.search.search("posterior prior"))
       .toEqual(expect.arrayContaining([
         expect.objectContaining({ documentId: bayes?.source?.id }),
       ]));
@@ -519,47 +519,47 @@ describe("batch ingestion", () => {
   });
 
   it("rejects malformed and oversized batch requests with distinguishable codes", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await mkdir(path.join(root, "empty"), { recursive: true });
     await writeFile(path.join(root, "empty", "notes.key"), "unsupported", "utf8");
 
-    expect(await ingestCode(() => knowledge.ingestMany({})))
+    expect(await ingestCode(() => metis.ingestion.ingestMany({})))
       .toBe("INGEST_INPUT_AMBIGUOUS");
-    expect(await ingestCode(() => knowledge.ingestMany({
+    expect(await ingestCode(() => metis.ingestion.ingestMany({
       sourcePaths: ["a.md"],
       directory: "empty",
     }))).toBe("INGEST_INPUT_AMBIGUOUS");
-    expect(await ingestCode(() => knowledge.ingestMany({ directory: "empty" })))
+    expect(await ingestCode(() => metis.ingestion.ingestMany({ directory: "empty" })))
       .toBe("INGEST_BATCH_EMPTY");
-    expect(await ingestCode(() => knowledge.ingestMany({ directory: "absent" })))
+    expect(await ingestCode(() => metis.ingestion.ingestMany({ directory: "absent" })))
       .toBe("INGEST_SOURCE_NOT_FOUND");
-    expect(await ingestCode(() => knowledge.ingestMany({ directory: "raw" })))
+    expect(await ingestCode(() => metis.ingestion.ingestMany({ directory: "raw" })))
       .toBe("INGEST_DIRECTORY_MANAGED");
-    expect(await ingestCode(() => knowledge.ingestMany({ directory: "wiki/sources" })))
+    expect(await ingestCode(() => metis.ingestion.ingestMany({ directory: "wiki/sources" })))
       .toBe("INGEST_DIRECTORY_MANAGED");
-    expect(await ingestCode(() => knowledge.ingestMany({
+    expect(await ingestCode(() => metis.ingestion.ingestMany({
       sourcePaths: ["wiki/concepts/chain-rule.md"],
     }))).toBe("INGEST_SOURCE_MANAGED");
-    expect(await ingestCode(() => knowledge.ingestMany({
+    expect(await ingestCode(() => metis.ingestion.ingestMany({
       sourcePaths: ["good.md", "raw/src-1-notes.md"],
     }))).toBe("INGEST_SOURCE_MANAGED");
-    expect(await ingestCode(() => knowledge.ingestMany({ directory: "empty/notes.key" })))
+    expect(await ingestCode(() => metis.ingestion.ingestMany({ directory: "empty/notes.key" })))
       .toBe("INGEST_SOURCE_NOT_A_DIRECTORY");
-    expect(await ingestCode(() => knowledge.ingestMany({ directory: ".." })))
+    expect(await ingestCode(() => metis.ingestion.ingestMany({ directory: ".." })))
       .toBe("INGEST_PATH_OUTSIDE_VAULT");
-    expect(await ingestCode(() => knowledge.ingestMany({ directory: "/etc" })))
+    expect(await ingestCode(() => metis.ingestion.ingestMany({ directory: "/etc" })))
       .toBe("INGEST_PATH_OUTSIDE_VAULT");
-    expect(await ingestCode(() => knowledge.ingestMany({
+    expect(await ingestCode(() => metis.ingestion.ingestMany({
       sourcePaths: Array.from({ length: 201 }, (_, index) => `note-${index}.md`),
     }))).toBe("INGEST_BATCH_TOO_LARGE");
   });
 
   it("reports a per-path failure without disturbing the rest of the list", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await writeFile(path.join(root, "good.md"), "Good evidence.\n", "utf8");
     await writeFile(path.join(root, "report.docx"), "unsupported", "utf8");
 
-    const result = await knowledge.ingestMany({
+    const result = await metis.ingestion.ingestMany({
       sourcePaths: ["good.md", "report.docx", "missing.md", "good.md"],
     });
 
@@ -578,9 +578,9 @@ describe("batch ingestion", () => {
   });
 
   it("keeps a committed batch when indexing one item afterwards fails", async () => {
-    const { root, store, knowledge } = await fixture();
+    const { root, store, metis } = await fixture();
     await writeFile(path.join(root, "seed.md"), "Seed evidence for the batch.\n", "utf8");
-    await knowledge.ingest({ title: "Seed", sourcePath: "seed.md" });
+    await metis.ingestion.ingest({ title: "Seed", sourcePath: "seed.md" });
     // Corrupt the committed raw copy, so re-reading the duplicate's text after
     // the commit fails integrity verification.
     const [rawName] = await readdir(path.join(root, "raw"));
@@ -589,9 +589,9 @@ describe("batch ingestion", () => {
     await writeFile(rawCopy, "Tampered evidence.\n", "utf8");
     await writeFile(path.join(root, "fresh.md"), "Fresh evidence for the batch.\n", "utf8");
     // A cold service, so the duplicate's text comes off disk rather than cache.
-    const cold = new KnowledgeService(store);
+    const cold = createKernel(store);
 
-    const result = await cold.ingestMany({ sourcePaths: ["seed.md", "fresh.md"] });
+    const result = await cold.ingestion.ingestMany({ sourcePaths: ["seed.md", "fresh.md"] });
 
     expect(result.ingested).toBe(1);
     expect(result.duplicates).toBe(1);
@@ -604,7 +604,7 @@ describe("batch ingestion", () => {
   });
 
   it("leaves no staged copy behind when the shared commit fails", async () => {
-    const { root, store, knowledge } = await fixture();
+    const { root, store, metis } = await fixture();
     await mkdir(path.join(root, "batch"), { recursive: true });
     await writeFile(path.join(root, "batch", "one.md"), "First evidence.\n", "utf8");
     await writeFile(path.join(root, "batch", "two.md"), "Second evidence.\n", "utf8");
@@ -613,7 +613,7 @@ describe("batch ingestion", () => {
       throw failing;
     };
 
-    expect(await ingestCode(() => knowledge.ingestMany({ directory: "batch" })))
+    expect(await ingestCode(() => metis.ingestion.ingestMany({ directory: "batch" })))
       .toBe("INGEST_COMMIT_FAILED");
     expect(await readdir(path.join(root, "raw"))).toHaveLength(0);
     expect(await readdir(path.join(root, ".metis", "cache", "text-v1"))).toHaveLength(0);
@@ -622,32 +622,32 @@ describe("batch ingestion", () => {
 
 describe("ingestion error codes", () => {
   it("rejects malformed requests with distinguishable codes", async () => {
-    const { knowledge } = await fixture();
+    const { metis } = await fixture();
 
-    expect(await ingestCode(() => knowledge.ingest({ title: "  ", content: "x" })))
+    expect(await ingestCode(() => metis.ingestion.ingest({ title: "  ", content: "x" })))
       .toBe("INGEST_TITLE_EMPTY");
-    expect(await ingestCode(() => knowledge.ingest({ title: "Both", content: "x", sourcePath: "a.md" })))
+    expect(await ingestCode(() => metis.ingestion.ingest({ title: "Both", content: "x", sourcePath: "a.md" })))
       .toBe("INGEST_INPUT_AMBIGUOUS");
-    expect(await ingestCode(() => knowledge.ingest({ title: "Neither" })))
+    expect(await ingestCode(() => metis.ingestion.ingest({ title: "Neither" })))
       .toBe("INGEST_INPUT_AMBIGUOUS");
-    expect(await ingestCode(() => knowledge.ingest({ title: "Blank", content: "   \n  " })))
+    expect(await ingestCode(() => metis.ingestion.ingest({ title: "Blank", content: "   \n  " })))
       .toBe("INGEST_CONTENT_EMPTY");
   });
 
   it("distinguishes unsupported, missing, and non-file inputs", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await writeFile(path.join(root, "report.docx"), "binary-ish", "utf8");
     await mkdir(path.join(root, "notes-folder.md"), { recursive: true });
 
-    expect(await ingestCode(() => knowledge.ingest({
+    expect(await ingestCode(() => metis.ingestion.ingest({
       title: "Word Report",
       sourcePath: "report.docx",
     }))).toBe("INGEST_UNSUPPORTED_TYPE");
-    expect(await ingestCode(() => knowledge.ingest({
+    expect(await ingestCode(() => metis.ingestion.ingest({
       title: "Absent",
       sourcePath: "missing.md",
     }))).toBe("INGEST_SOURCE_NOT_FOUND");
-    expect(await ingestCode(() => knowledge.ingest({
+    expect(await ingestCode(() => metis.ingestion.ingest({
       title: "Directory",
       sourcePath: "notes-folder.md",
     }))).toBe("INGEST_SOURCE_NOT_A_FILE");
@@ -656,13 +656,13 @@ describe("ingestion error codes", () => {
   it.skipIf(process.platform === "win32")(
     "codes a vault escape distinctly from a missing file",
     async () => {
-      const { root, knowledge } = await fixture();
+      const { root, metis } = await fixture();
       const externalRoot = await mkdtemp(path.join(os.tmpdir(), "metis-ingest-external-"));
       temporaryDirectories.push(externalRoot);
       await writeFile(path.join(externalRoot, "outside.md"), "Outside the vault.", "utf8");
       await symlink(path.join(externalRoot, "outside.md"), path.join(root, "linked.md"));
 
-      expect(await ingestCode(() => knowledge.ingest({
+      expect(await ingestCode(() => metis.ingestion.ingest({
         title: "Escaped",
         sourcePath: "linked.md",
       }))).toBe("INGEST_PATH_OUTSIDE_VAULT");
@@ -670,15 +670,15 @@ describe("ingestion error codes", () => {
   );
 
   it("refuses non-UTF-8 and textless sources without storing them", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await writeFile(path.join(root, "latin.txt"), Buffer.from([0x48, 0x69, 0xff, 0xfe]));
     await writeFile(path.join(root, "blank.txt"), "\n   \n\t\n", "utf8");
 
-    expect(await ingestCode(() => knowledge.ingest({
+    expect(await ingestCode(() => metis.ingestion.ingest({
       title: "Latin Bytes",
       sourcePath: "latin.txt",
     }))).toBe("EXTRACT_NOT_UTF8");
-    expect(await ingestCode(() => knowledge.ingest({
+    expect(await ingestCode(() => metis.ingestion.ingest({
       title: "Blank Notes",
       sourcePath: "blank.txt",
     }))).toBe("EXTRACT_EMPTY_TEXT");
@@ -686,7 +686,7 @@ describe("ingestion error codes", () => {
   });
 
   it("accepts a UTF-8 byte-order mark and strips it from evidence", async () => {
-    const { root, knowledge } = await fixture();
+    const { root, metis } = await fixture();
     await writeFile(
       path.join(root, "bom.txt"),
       Buffer.concat([
@@ -695,12 +695,12 @@ describe("ingestion error codes", () => {
       ]),
     );
 
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "BOM Notes",
       sourcePath: "bom.txt",
     });
 
-    const text = await knowledge.readSourceText(ingested.source);
+    const text = await metis.sources.readSourceText(ingested.source);
     expect(text.startsWith("Photosynthesis")).toBe(true);
   });
 
@@ -775,9 +775,9 @@ describe("Claude vision request", () => {
     await withStubApi(
       { status: 200, payload: stubMessage() },
       async (captured) => {
-        const { root, knowledge } = await fixture(new AnthropicVisionTranscriber());
+        const { root, metis } = await fixture(new AnthropicVisionTranscriber());
         await writeFile(path.join(root, "slide.png"), pngBytes());
-        const ingested = await knowledge.ingest({
+        const ingested = await metis.ingestion.ingest({
           title: "Chlorophyll Slide",
           sourcePath: "slide.png",
         });
@@ -806,7 +806,7 @@ describe("Claude vision request", () => {
           method: "vision",
           model: CHEAPEST_VISION_MODEL,
         }));
-        expect(await knowledge.readSourceText(ingested.source))
+        expect(await metis.sources.readSourceText(ingested.source))
           .toBe("Chlorophyll absorbs red and blue light.");
       },
     );
@@ -816,9 +816,9 @@ describe("Claude vision request", () => {
     await withStubApi(
       { status: 200, payload: stubMessage({ stop_reason: "max_tokens" }) },
       async () => {
-        const { root, knowledge } = await fixture(new AnthropicVisionTranscriber());
+        const { root, metis } = await fixture(new AnthropicVisionTranscriber());
         await writeFile(path.join(root, "slide.png"), pngBytes());
-        expect(await ingestCode(() => knowledge.ingest({
+        expect(await ingestCode(() => metis.ingestion.ingest({
           title: "Long Slide",
           sourcePath: "slide.png",
         }))).toBe("EXTRACT_VISION_TRUNCATED");
@@ -837,9 +837,9 @@ describe("Claude vision request", () => {
         }),
       },
       async () => {
-        const { root, knowledge } = await fixture(new AnthropicVisionTranscriber());
+        const { root, metis } = await fixture(new AnthropicVisionTranscriber());
         await writeFile(path.join(root, "slide.png"), pngBytes());
-        expect(await ingestCode(() => knowledge.ingest({
+        expect(await ingestCode(() => metis.ingestion.ingest({
           title: "Refused Slide",
           sourcePath: "slide.png",
         }))).toBe("EXTRACT_VISION_REFUSED");
@@ -855,14 +855,14 @@ describe("Claude vision request", () => {
       },
       async () => {
         const { root, store } = await fixture();
-        const knowledge = new KnowledgeService(
+        const metis = createKernel(
           store,
           new AnthropicVisionTranscriber(),
         );
         await writeFile(path.join(root, "slide.png"), pngBytes());
         let raised: MetisError | undefined;
         try {
-          await knowledge.ingest({ title: "Busy Slide", sourcePath: "slide.png" });
+          await metis.ingestion.ingest({ title: "Busy Slide", sourcePath: "slide.png" });
         } catch (error) {
           raised = error as MetisError;
         }
@@ -992,9 +992,9 @@ describe("ingestion over MCP", () => {
 describe("derived text integrity", () => {
   it("refuses to re-transcribe an image whose stored transcript is gone", async () => {
     const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
-    const { root, store, knowledge } = await fixture(transcriber);
+    const { root, store, metis } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.png"), pngBytes());
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Chlorophyll Slide",
       sourcePath: "slide.png",
     });
@@ -1010,17 +1010,17 @@ describe("derived text integrity", () => {
 
     // A second transcription would move every line citation into this source,
     // so the read fails instead of quietly answering from different text.
-    const reopened = new KnowledgeService(store, transcriber);
-    expect(await ingestCode(() => reopened.readSourceText(ingested.source)))
+    const reopened = createKernel(store, transcriber);
+    expect(await ingestCode(() => reopened.sources.readSourceText(ingested.source)))
       .toBe("DERIVED_TEXT_UNRECOVERABLE");
     expect(transcriber.calls).toHaveLength(1);
   });
 
   it("rejects a transcript that no longer matches its own checksum", async () => {
     const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
-    const { root, store, knowledge } = await fixture(transcriber);
+    const { root, store, metis } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.png"), pngBytes());
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Chlorophyll Slide",
       sourcePath: "slide.png",
     });
@@ -1036,17 +1036,17 @@ describe("derived text integrity", () => {
     entry.text = "Absorption peaks near 700 nm.";
     await writeFile(cachePath, `${JSON.stringify(entry)}\n`, "utf8");
 
-    const reopened = new KnowledgeService(store, transcriber);
-    expect(await ingestCode(() => reopened.readSourceText(ingested.source)))
+    const reopened = createKernel(store, transcriber);
+    expect(await ingestCode(() => reopened.sources.readSourceText(ingested.source)))
       .toBe("DERIVED_TEXT_UNRECOVERABLE");
     expect(transcriber.calls).toHaveLength(1);
   });
 
   it("accepts a pre-checksum transcript so an existing vault keeps its citations", async () => {
     const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
-    const { root, store, knowledge } = await fixture(transcriber);
+    const { root, store, metis } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.png"), pngBytes());
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Chlorophyll Slide",
       sourcePath: "slide.png",
     });
@@ -1063,13 +1063,13 @@ describe("derived text integrity", () => {
     entry.formatVersion = 1;
     await writeFile(cachePath, `${JSON.stringify(entry)}\n`, "utf8");
 
-    const reopened = new KnowledgeService(store, transcriber);
-    await expect(reopened.readSourceText(ingested.source))
+    const reopened = createKernel(store, transcriber);
+    await expect(reopened.sources.readSourceText(ingested.source))
       .resolves.toContain("430 nm");
 
     // Repair is the boundary that adds the missing checksum.
-    const repaired = await new KnowledgeService(store, transcriber)
-      .repairKnowledge({});
+    const repaired = await createKernel(store, transcriber)
+      .knowledgeRepair.repairKnowledge({});
     expect(repaired.derivedText).toEqual(expect.objectContaining({
       expected: 1,
       upgraded: 1,
@@ -1083,12 +1083,12 @@ describe("derived text integrity", () => {
   });
 
   it("recovers a PDF derivation from the raw bytes and re-persists it", async () => {
-    const { root, store, knowledge } = await fixture();
+    const { root, store, metis } = await fixture();
     await writeFile(
       path.join(root, "paper.pdf"),
       pdfBytes("Photosynthesis converts light energy into chemical energy."),
     );
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Photosynthesis Paper",
       sourcePath: "paper.pdf",
     });
@@ -1103,8 +1103,8 @@ describe("derived text integrity", () => {
 
     // Unlike a transcript, PDF text is a function of the checksum-verified
     // bytes, so it is recoverable rather than lost.
-    const reopened = new KnowledgeService(store);
-    await expect(reopened.readSourceText(ingested.source))
+    const reopened = createKernel(store);
+    await expect(reopened.sources.readSourceText(ingested.source))
       .resolves.toContain("chemical energy");
     const rewritten = JSON.parse(await readFile(cachePath, "utf8")) as
       Record<string, unknown>;
@@ -1114,9 +1114,9 @@ describe("derived text integrity", () => {
 
   it("reports a missing transcript instead of counting it as retained", async () => {
     const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
-    const { root, store, knowledge } = await fixture(transcriber);
+    const { root, store, metis } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.png"), pngBytes());
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Chlorophyll Slide",
       sourcePath: "slide.png",
     });
@@ -1128,8 +1128,8 @@ describe("derived text integrity", () => {
       `${ingested.source.checksum}.json`,
     ));
 
-    const repaired = await new KnowledgeService(store, transcriber)
-      .repairKnowledge({});
+    const repaired = await createKernel(store, transcriber)
+      .knowledgeRepair.repairKnowledge({});
     expect(repaired.derivedText).toEqual(expect.objectContaining({
       expected: 1,
       verified: 0,
@@ -1139,9 +1139,9 @@ describe("derived text integrity", () => {
 
   it("backs up a transcript and restores it after the cache is lost", async () => {
     const transcriber = new StubTranscriber("Absorption peaks near 430 nm.");
-    const { root, store, knowledge } = await fixture(transcriber);
+    const { root, store, metis } = await fixture(transcriber);
     await writeFile(path.join(root, "slide.png"), pngBytes());
-    const ingested = await knowledge.ingest({
+    const ingested = await metis.ingestion.ingest({
       title: "Chlorophyll Slide",
       sourcePath: "slide.png",
     });
@@ -1163,8 +1163,8 @@ describe("derived text integrity", () => {
     const restored = await store.restoreVaultBackup(backup);
     expect(restored.restored).toBe(true);
 
-    const reopened = new KnowledgeService(store, transcriber);
-    await expect(reopened.readSourceText(ingested.source))
+    const reopened = createKernel(store, transcriber);
+    await expect(reopened.sources.readSourceText(ingested.source))
       .resolves.toContain("430 nm");
     expect(transcriber.calls).toHaveLength(1);
   });

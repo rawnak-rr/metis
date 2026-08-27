@@ -1,9 +1,9 @@
 import {
-  KnowledgeService,
+  KnowledgeRepair,
   type KnowledgeRepairMode,
   type KnowledgeRepairResult,
-  type WikiLintResult,
-} from "../ingestion/knowledge.js";
+} from "./knowledge.js";
+import { WikiService, type WikiLintResult } from "../synthesis/wiki.js";
 import { SEARCH_INDEX_DERIVATION_VERSION } from "../search/retrieval.js";
 import {
   CURRENT_CONFIG_SCHEMA_VERSION,
@@ -44,7 +44,8 @@ export interface VaultRepairResult {
 export class RepairService {
   constructor(
     private readonly store: StudyStore,
-    private readonly knowledge: KnowledgeService,
+    private readonly knowledgeRepair: KnowledgeRepair,
+    private readonly wiki: WikiService,
   ) {}
 
   async repair(options: {
@@ -58,8 +59,8 @@ export class RepairService {
     let update: VaultUpdateResult | undefined;
     try {
       update = await this.store.updateVault({ deferKnowledgeRefresh: true });
-      const knowledge = await this.knowledge.repairKnowledge({ mode });
-      const wikiHealth = await this.knowledge.lintWiki({ log: false });
+      const knowledge = await this.knowledgeRepair.repairKnowledge({ mode });
+      const wikiHealth = await this.wiki.lintWiki({ log: false });
       if (!wikiHealth.healthy) {
         const errors = wikiHealth.issues
           .filter((issue) => issue.severity === "error")
@@ -136,8 +137,8 @@ export class RepairService {
           "Knowledge verification and rebuild planning will run after the required schema migrations.",
       };
     }
-    const knowledge = await this.knowledge.repairKnowledge({ mode, dryRun: true });
-    const wikiHealth = await this.knowledge.lintWiki({ log: false });
+    const knowledge = await this.knowledgeRepair.repairKnowledge({ mode, dryRun: true });
+    const wikiHealth = await this.wiki.lintWiki({ log: false });
     return {
       metisVersion: METIS_VERSION,
       vaultRoot: this.store.root,

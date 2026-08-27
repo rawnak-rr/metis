@@ -2,15 +2,16 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import {
-  CONTEXT_LIMITS,
-  KnowledgeService,
-  compactConceptCapsule,
-  type WikiLintResult,
-} from "../ingestion/knowledge.js";
 import { errorPayload } from "../shared/errors.js";
-import { SUPPORTED_SOURCE_EXTENSIONS } from "../ingestion/extract.js";
+import { CONTEXT_LIMITS } from "../shared/limits.js";
+import { SUPPORTED_SOURCE_EXTENSIONS } from "../contracts/source-types.js";
+import { createKernel, type MetisKernel } from "../kernel.js";
+import { compactConceptCapsule } from "../search/concepts.js";
+import { evidenceExcerpts } from "../search/service.js";
+import { dashboard, knowledgeGraph } from "../vault/views.js";
+import type { WikiLintResult } from "../synthesis/wiki.js";
 import { GroundingService } from "../grounding/service.js";
+import { PacketStore } from "../grounding/packets.js";
 import { GROUNDING_POLICY } from "../grounding/policy.js";
 import { RepairService } from "../repair/service.js";
 import { samplingEntailmentJudge } from "./sampling.js";
@@ -25,7 +26,7 @@ const RESOURCE_LOG_TAIL_CHARACTERS = 3_000;
 export interface StudyServer {
   server: McpServer;
   store: StudyStore;
-  knowledge: KnowledgeService;
+  kernel: MetisKernel;
   grounding: GroundingService;
   repair: RepairService;
 }
@@ -36,9 +37,13 @@ export async function createStudyServer(
 ): Promise<StudyServer> {
   const store = new StudyStore(root);
   await store.initialize();
-  const knowledge = new KnowledgeService(store, options.vision);
-  const grounding = new GroundingService(store, knowledge);
-  const repair = new RepairService(store, knowledge);
+  const kernel = createKernel(store, options.vision);
+  const grounding = new GroundingService(
+    store,
+    kernel.search,
+    new PacketStore(store),
+  );
+  const repair = new RepairService(store, kernel.knowledgeRepair, kernel.wiki);
   const server = new McpServer({
     name: "metis",
     version: METIS_VERSION,
@@ -64,13 +69,13 @@ export async function createStudyServer(
   // capability per call rather than at construction.
   grounding.useEntailmentJudge(samplingEntailmentJudge(() => server.server));
 
-  registerResources(server, store, knowledge);
+  registerResources(server, store, kernel);
   registerPrompts(server);
-  registerTools(server, store, knowledge, grounding, repair);
-  return { server, store, knowledge, grounding, repair };
+  registerTools(server, store, kernel, grounding, repair);
+  return { server, store, kernel, grounding, repair };
 }
 
-function registerResources(server: McpServer, store: StudyStore, knowledge: KnowledgeService): void {
+function registerResources(server: McpServer, store: StudyStore, kernel: MetisKernel): void {
   server.registerResource(
     "study-dashboard",
     "study://dashboard",
@@ -83,7 +88,7 @@ function registerResources(server: McpServer, store: StudyStore, knowledge: Know
       contents: [{
         uri: "study://dashboard",
         mimeType: "application/json",
-        text: JSON.stringify(await store.dashboard()),
+        text: JSON.stringify(dashboard(await store.readState())),
       }],
     }),
   );
@@ -127,7 +132,7 @@ function registerResources(server: McpServer, store: StudyStore, knowledge: Know
     },
     async (uri, variables) => {
       const slug = await requireWikiPageSlug(store, variables.slug);
-      const capsule = (await knowledge.lookupConcepts(slug, 1))[0];
+      const capsule = (await kernel.search.lookupConcepts(slug, 1))[0];
       if (!capsule || capsule.key !== slug) {
         throw new Error(`Concept capsule is unavailable: ${slug}`);
       }
@@ -237,7 +242,7 @@ function registerPrompts(server: McpServer): void {
 function registerTools(
   server: McpServer,
   store: StudyStore,
-  knowledge: KnowledgeService,
+  kernel: MetisKernel,
   grounding: GroundingService,
   repair: RepairService,
 ): void {
@@ -327,7 +332,7 @@ function registerTools(
       annotations: writeAnnotations(false),
     },
     async (input) => codedResult(async () => {
-      const result = await knowledge.ingest(input);
+      const result = await kernel.ingestion.ingest(input);
       return {
         source: {
           id: result.source.id,
@@ -361,7 +366,7 @@ function registerTools(
       annotations: writeAnnotations(false),
     },
     async (input) => codedResult(async () => {
-      const result = await knowledge.ingestMany(input);
+      const result = await kernel.ingestion.ingestMany(input);
       return {
         requested: result.requested,
         ingested: result.ingested,
@@ -406,7 +411,7 @@ function registerTools(
       annotations: writeAnnotations(false, true),
     },
     async (input) => {
-      const page = await knowledge.upsertWikiPage(input);
+      const page = await kernel.wiki.upsertWikiPage(input);
       return jsonResult({
         concept: {
           key: page.slug,
@@ -437,15 +442,15 @@ function registerTools(
         : CONTEXT_LIMITS.sourceResultsDefault);
       const concepts = scope === "sources"
         ? []
-        : await knowledge.lookupConcepts(query, resolvedLimit);
+        : await kernel.search.lookupConcepts(query, resolvedLimit);
       const hits = scope === "wiki"
         ? []
-        : await knowledge.search(query, resolvedLimit);
+        : await kernel.search.search(query, resolvedLimit);
       return jsonResult({
         ...(concepts.length > 0
           ? { concepts: concepts.map(compactConceptCapsule) }
           : {}),
-        ...(hits.length > 0 ? { evidence: knowledge.evidenceExcerpts(hits) } : {}),
+        ...(hits.length > 0 ? { evidence: evidenceExcerpts(hits) } : {}),
         ...(concepts.length === 0 && hits.length === 0 ? { empty: true } : {}),
       });
     },
@@ -462,7 +467,7 @@ function registerTools(
       },
       annotations: readAnnotations(),
     },
-    async ({ citations }) => jsonResult(await knowledge.resolveCitations(citations)),
+    async ({ citations }) => jsonResult(await kernel.citations.resolveCitations(citations)),
   );
 
   server.registerTool(
@@ -504,7 +509,7 @@ function registerTools(
       annotations: readAnnotations(),
     },
     async ({ focusId, limit, mermaid }) =>
-      jsonResult(await store.knowledgeGraph({
+      jsonResult(knowledgeGraph(await store.readState(), {
         focusId,
         limit,
         includeMermaid: mermaid,
@@ -524,7 +529,7 @@ function registerTools(
     },
     async ({ severity, offset, limit }) =>
       jsonResult(boundedWikiHealth(
-        await knowledge.lintWiki(),
+        await kernel.wiki.lintWiki(),
         { severity, offset, limit },
       )),
   );

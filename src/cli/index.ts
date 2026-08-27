@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { KnowledgeService, type KnowledgeRepairMode } from "../ingestion/knowledge.js";
+import { createKernel } from "../kernel.js";
+import type { KnowledgeRepairMode } from "../repair/knowledge.js";
 import { RepairService } from "../repair/service.js";
 import { createStudyServer } from "../mcp/server.js";
 import { StudyStore } from "../vault/store.js";
@@ -59,8 +60,8 @@ async function runRepairCommand(args: string[]): Promise<void> {
 
   const store = new StudyStore(vaultRoot);
   await store.initialize();
-  const knowledge = new KnowledgeService(store);
-  const repair = new RepairService(store, knowledge);
+  const kernel = createKernel(store);
+  const repair = new RepairService(store, kernel.knowledgeRepair, kernel.wiki);
   const result = await repair.repair({ dryRun, mode });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }

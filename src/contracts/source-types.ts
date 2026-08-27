@@ -1,0 +1,67 @@
+import type {
+  ExtractionMethod,
+  ImageMediaType,
+  SourceRecord,
+} from "./types.js";
+
+/**
+ * Which file formats are evidence, and how each one's text is derived.
+ *
+ * This is contract, not mechanism: the extension table and the extraction
+ * method recorded on a stored source have to agree for a citation to keep
+ * addressing the same lines, so the mapping lives beside the schema that
+ * validates it rather than beside the extractors that use it.
+ */
+export interface SourceTypeDescriptor {
+  kind: SourceRecord["kind"];
+  method: ExtractionMethod;
+  mediaType?: ImageMediaType;
+}
+
+const SOURCE_TYPES: Record<string, SourceTypeDescriptor> = {
+  ".md": { kind: "markdown", method: "markdown" },
+  ".markdown": { kind: "markdown", method: "markdown" },
+  ".txt": { kind: "text", method: "verbatim" },
+  ".text": { kind: "text", method: "verbatim" },
+  ".tex": { kind: "latex", method: "latex" },
+  ".pdf": { kind: "pdf", method: "pdftotext" },
+  ".csv": { kind: "data", method: "verbatim" },
+  ".tsv": { kind: "data", method: "verbatim" },
+  ".json": { kind: "data", method: "verbatim" },
+  ".yaml": { kind: "data", method: "verbatim" },
+  ".yml": { kind: "data", method: "verbatim" },
+  ".png": { kind: "image", method: "vision", mediaType: "image/png" },
+  ".jpg": { kind: "image", method: "vision", mediaType: "image/jpeg" },
+  ".jpeg": { kind: "image", method: "vision", mediaType: "image/jpeg" },
+  ".gif": { kind: "image", method: "vision", mediaType: "image/gif" },
+  ".webp": { kind: "image", method: "vision", mediaType: "image/webp" },
+};
+
+export const SUPPORTED_SOURCE_EXTENSIONS = Object.keys(SOURCE_TYPES);
+
+export function sourceTypeFor(extension: string): SourceTypeDescriptor | undefined {
+  return SOURCE_TYPES[extension.toLowerCase()];
+}
+
+/** Descriptor for a stored source, recovered from its recorded extraction method. */
+export function descriptorForSource(source: SourceRecord): SourceTypeDescriptor {
+  return {
+    kind: source.kind,
+    method: source.extraction.method,
+    ...(source.extraction.mediaType
+      ? { mediaType: source.extraction.mediaType }
+      : {}),
+  };
+}
+
+/** Human-readable extraction provenance for generated source pages and logs. */
+export function describeExtraction(source: SourceRecord): string {
+  return source.extraction.model
+    ? `${source.extraction.method} (${source.extraction.model})`
+    : source.extraction.method;
+}
+
+/** True when re-deriving this text is expensive or non-deterministic. */
+export function isDerivedTextPersisted(method: ExtractionMethod): boolean {
+  return method === "pdftotext" || method === "vision";
+}

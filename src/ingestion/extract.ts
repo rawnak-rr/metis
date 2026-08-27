@@ -1,11 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { MetisError } from "../shared/errors.js";
-import type { ExtractionMethod, SourceRecord } from "../contracts/types.js";
+import type { SourceTypeDescriptor } from "../contracts/source-types.js";
 import { messageOf } from "../shared/util.js";
 import {
   MAX_VISION_IMAGE_BYTES,
-  type ImageMediaType,
   type VisionTranscriber,
 } from "./vision.js";
 
@@ -14,62 +13,8 @@ const execFileAsync = promisify(execFile);
 /** Byte ceiling for text and PDF sources; images use MAX_VISION_IMAGE_BYTES. */
 export const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
 
-export interface SourceTypeDescriptor {
-  kind: SourceRecord["kind"];
-  method: ExtractionMethod;
-  mediaType?: ImageMediaType;
-}
-
-const SOURCE_TYPES: Record<string, SourceTypeDescriptor> = {
-  ".md": { kind: "markdown", method: "markdown" },
-  ".markdown": { kind: "markdown", method: "markdown" },
-  ".txt": { kind: "text", method: "verbatim" },
-  ".text": { kind: "text", method: "verbatim" },
-  ".tex": { kind: "latex", method: "latex" },
-  ".pdf": { kind: "pdf", method: "pdftotext" },
-  ".csv": { kind: "data", method: "verbatim" },
-  ".tsv": { kind: "data", method: "verbatim" },
-  ".json": { kind: "data", method: "verbatim" },
-  ".yaml": { kind: "data", method: "verbatim" },
-  ".yml": { kind: "data", method: "verbatim" },
-  ".png": { kind: "image", method: "vision", mediaType: "image/png" },
-  ".jpg": { kind: "image", method: "vision", mediaType: "image/jpeg" },
-  ".jpeg": { kind: "image", method: "vision", mediaType: "image/jpeg" },
-  ".gif": { kind: "image", method: "vision", mediaType: "image/gif" },
-  ".webp": { kind: "image", method: "vision", mediaType: "image/webp" },
-};
-
-export const SUPPORTED_SOURCE_EXTENSIONS = Object.keys(SOURCE_TYPES);
-
-export function sourceTypeFor(extension: string): SourceTypeDescriptor | undefined {
-  return SOURCE_TYPES[extension.toLowerCase()];
-}
-
-/** Descriptor for a stored source, recovered from its recorded extraction method. */
-export function descriptorForSource(source: SourceRecord): SourceTypeDescriptor {
-  return {
-    kind: source.kind,
-    method: source.extraction.method,
-    ...(source.extraction.mediaType
-      ? { mediaType: source.extraction.mediaType }
-      : {}),
-  };
-}
-
-/** Human-readable extraction provenance for generated source pages and logs. */
-export function describeExtraction(source: SourceRecord): string {
-  return source.extraction.model
-    ? `${source.extraction.method} (${source.extraction.model})`
-    : source.extraction.method;
-}
-
 export function maxBytesFor(descriptor: SourceTypeDescriptor): number {
   return descriptor.method === "vision" ? MAX_VISION_IMAGE_BYTES : MAX_SOURCE_BYTES;
-}
-
-/** True when re-deriving this text is expensive or non-deterministic. */
-export function isDerivedTextPersisted(method: ExtractionMethod): boolean {
-  return method === "pdftotext" || method === "vision";
 }
 
 export interface ExtractedText {

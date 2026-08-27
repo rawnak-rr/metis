@@ -5,12 +5,13 @@ import type {
   GroundingMode,
   SearchChunk,
 } from "../contracts/types.js";
+import { compactConceptCapsule } from "../search/concepts.js";
+import { tokenize } from "../shared/lexicon.js";
 import {
-  KnowledgeService,
-  compactConceptCapsule,
-  tokenize,
+  SearchService,
+  evidenceExcerpts,
   type RetrievalSession,
-} from "../ingestion/knowledge.js";
+} from "../search/service.js";
 import {
   MAX_JUDGED_PASSAGES,
   type EntailmentJudge,
@@ -18,6 +19,7 @@ import {
   type EntailmentVerdicts,
 } from "./entailment.js";
 import { StudyStore } from "../vault/store.js";
+import { PacketStore } from "./packets.js";
 import { groundingModeSchema } from "../contracts/schema.js";
 import { newId, nowIso, unique } from "../shared/util.js";
 
@@ -137,7 +139,8 @@ export class GroundingService {
 
   constructor(
     private readonly store: StudyStore,
-    private readonly knowledge: KnowledgeService,
+    private readonly search: SearchService,
+    private readonly packets: PacketStore,
   ) {}
 
   /**
@@ -162,7 +165,7 @@ export class GroundingService {
       1,
       Math.min(MAX_ANSWER_EVIDENCE, Math.round(limit)),
     );
-    const retrieval = await this.knowledge.openRetrieval();
+    const retrieval = await this.search.openRetrieval();
     const concepts = retrieval.lookupConcepts(question, 2);
     const answerFacets = buildAnswerFacets(question, requestedFacets);
     const facetRetrievals: FacetRetrieval[] = [];
@@ -194,8 +197,7 @@ export class GroundingService {
       await this.judgeFacets(facetRetrievals, lexicalFacets, selectedHitKeys),
     );
     const coverage = aggregateFacetCoverage(facets);
-    const completeEvidence: PacketEvidenceExcerpt[] = this.knowledge
-      .evidenceExcerpts(selection.hits)
+    const completeEvidence: PacketEvidenceExcerpt[] = evidenceExcerpts(selection.hits)
       .map((item) => selection.borderlineCitations.has(item.citation)
         ? { ...item, lexicalSupport: "related" as const }
         : item);
@@ -291,7 +293,7 @@ export class GroundingService {
   ): Promise<CachedEvidencePacket | undefined> {
     const cached = this.answerPackets.get(packetId);
     if (cached) return cached;
-    const stored = await this.store.readPacketRecord(packetId);
+    const stored = await this.packets.read(packetId);
     if (!stored) return undefined;
     const groundingMode = groundingModeSchema.safeParse(stored.groundingMode);
     if (!groundingMode.success) return undefined;
@@ -315,7 +317,7 @@ export class GroundingService {
       if (!oldest) break;
       this.answerPackets.delete(oldest);
     }
-    await this.store.savePacketRecord({
+    await this.packets.save({
       packetId,
       groundingMode: packet.groundingMode,
       citations: packet.citations,
