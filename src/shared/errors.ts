@@ -73,7 +73,7 @@ export interface MetisErrorPayload {
   detail?: string;
 }
 
-export function isMetisError(value: unknown): value is MetisError {
+function isMetisError(value: unknown): value is MetisError {
   return value instanceof MetisError;
 }
 

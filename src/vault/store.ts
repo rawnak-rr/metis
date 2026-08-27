@@ -1,11 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { Dirent } from "node:fs";
 import {
   access,
   mkdir,
   open,
   readFile,
-  readdir,
   stat,
   unlink,
 } from "node:fs/promises";
@@ -25,7 +23,6 @@ import {
   nowIso,
   safeExistingPath,
   safeWritePath,
-  stripFrontmatter,
 } from "../shared/util.js";
 import {
   DERIVED_TEXT_CACHE_DIRECTORY,
@@ -170,11 +167,6 @@ export class StudyStore {
     return this.readStateFile();
   }
 
-  async writeState(state: StudyState): Promise<void> {
-    await this.initialize();
-    await this.enqueueWrite(async () => this.writeStateFile(state));
-  }
-
   async mutate<T>(mutation: (state: StudyState) => T | Promise<T>): Promise<T> {
     await this.initialize();
     return this.enqueueWrite(async () => {
@@ -259,35 +251,6 @@ export class StudyStore {
       await safeWritePath(this.root, relativePath),
       logText(existing, operation, title, details),
     );
-  }
-
-  async writeSourcePage(source: SourceRecord, preview: string): Promise<void> {
-    await this.writeManagedPage(
-      path.posix.join("wiki", "sources", `${source.id}.md`),
-      sourcePageText(source, preview),
-    );
-  }
-
-  async writeWikiPage(page: WikiPageRecord, markdown: string): Promise<void> {
-    await this.writeManagedPage(
-      path.posix.join("wiki", "concepts", `${page.slug}.md`),
-      wikiPageText(page, markdown),
-    );
-  }
-
-  private async writeManagedPage(relativePath: string, text: string): Promise<void> {
-    await this.initialize();
-    await this.enqueueWrite(async () => {
-      await atomicWrite(await safeWritePath(this.root, relativePath), text);
-    });
-  }
-
-  async rebuildWikiIndex(): Promise<void> {
-    await this.initialize();
-    await this.enqueueWrite(async () => {
-      const state = await this.readStateFile();
-      await this.rebuildWikiIndexFile(state);
-    });
   }
 
   private async rebuildWikiIndexFile(state: StudyState): Promise<void> {

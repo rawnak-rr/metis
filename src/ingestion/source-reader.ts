@@ -141,7 +141,7 @@ export class VerifiedSourceReader {
    * its own recorded checksum, so a truncated or edited cache file is
    * indistinguishable from an absent one.
    */
-  async readDerivedText(source: SourceRecord): Promise<string | undefined> {
+  private async readDerivedText(source: SourceRecord): Promise<string | undefined> {
     try {
       const raw = await this.store.readText(derivedTextRelativePath(source.checksum));
       const value = JSON.parse(raw) as {

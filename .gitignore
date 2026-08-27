@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+.eval-results/
 .DS_Store
 *.log
 .metis/

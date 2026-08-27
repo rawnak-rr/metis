@@ -6,7 +6,7 @@ export const groundingModeSchema = z.enum([
   "open",
 ]);
 
-export const sourceKindSchema = z.enum([
+const sourceKindSchema = z.enum([
   "text",
   "markdown",
   "pdf",
@@ -16,7 +16,7 @@ export const sourceKindSchema = z.enum([
 ]);
 
 /** How a source's searchable text is derived from its immutable raw bytes. */
-export const extractionMethodSchema = z.enum([
+const extractionMethodSchema = z.enum([
   "verbatim",
   "markdown",
   "latex",
@@ -25,14 +25,14 @@ export const extractionMethodSchema = z.enum([
 ]);
 
 /** Image media types accepted by the Claude Messages API. */
-export const imageMediaTypeSchema = z.enum([
+const imageMediaTypeSchema = z.enum([
   "image/png",
   "image/jpeg",
   "image/gif",
   "image/webp",
 ]);
 
-export const sourceExtractionSchema = z.object({
+const sourceExtractionSchema = z.object({
   method: extractionMethodSchema,
   /** Image media type, recorded only for vision extraction. */
   mediaType: imageMediaTypeSchema.optional(),
@@ -41,7 +41,7 @@ export const sourceExtractionSchema = z.object({
   extractedAt: z.string().min(1).optional(),
 }).strict();
 
-export const sourceRecordSchema = z.object({
+const sourceRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
   kind: sourceKindSchema,
@@ -53,7 +53,7 @@ export const sourceRecordSchema = z.object({
   originalPath: z.string().optional(),
 }).strict();
 
-export const wikiPageRecordSchema = z.object({
+const wikiPageRecordSchema = z.object({
   slug: z.string().min(1),
   title: z.string().min(1),
   summary: z.string().min(1),
@@ -64,20 +64,20 @@ export const wikiPageRecordSchema = z.object({
   updatedAt: z.string().min(1),
 }).strict();
 
-export const conceptRecordSchema = z.object({
+const conceptRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
   notes: z.array(z.string()),
   sourceIds: z.array(z.string()),
 }).strict();
 
-export const studyStateSchema = z.object({
+const studyStateSchema = z.object({
   sources: z.array(sourceRecordSchema),
   wikiPages: z.array(wikiPageRecordSchema),
   concepts: z.array(conceptRecordSchema),
 }).strict();
 
-export const studyConfigSchema = z.object({
+const studyConfigSchema = z.object({
   name: z.string().min(1),
   createdAt: z.string().min(1),
   groundingDefault: groundingModeSchema,

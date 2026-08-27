@@ -34,9 +34,9 @@ export interface WikiLintResult {
   }>;
 }
 
-export type WikiValidationLevel = "structural" | "strict";
+type WikiValidationLevel = "structural" | "strict";
 
-export interface WikiValidationContext {
+interface WikiValidationContext {
   body: string;
   excerptsByToken: ReadonlyMap<string, string>;
 }
@@ -280,7 +280,7 @@ export class WikiService {
     return result;
   }
 
-  async validateWikiMarkdown(
+  private async validateWikiMarkdown(
     markdown: string,
     declaredSourceIds: string[],
     sources: SourceRecord[],

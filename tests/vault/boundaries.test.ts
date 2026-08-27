@@ -1,7 +1,6 @@
 import { readdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { createKernel } from "../../src/kernel.js";
 import { StudyStore } from "../../src/vault/store.js";
 import {
   fixture,

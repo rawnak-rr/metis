@@ -11,7 +11,7 @@ import {
 const execFileAsync = promisify(execFile);
 
 /** Byte ceiling for text and PDF sources; images use MAX_VISION_IMAGE_BYTES. */
-export const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
+const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
 
 export function maxBytesFor(descriptor: SourceTypeDescriptor): number {
   return descriptor.method === "vision" ? MAX_VISION_IMAGE_BYTES : MAX_SOURCE_BYTES;
@@ -67,7 +67,7 @@ export async function extractSourceText(input: {
  * another encoding, and silently indexing replacement characters would store
  * unusable evidence.
  */
-export function decodeUtf8(bytes: Buffer, title: string): string {
+function decodeUtf8(bytes: Buffer, title: string): string {
   const payload = hasUtf8Bom(bytes) ? bytes.subarray(3) : bytes;
   const decoded = payload.toString("utf8");
   if (!Buffer.from(decoded, "utf8").equals(payload)) {

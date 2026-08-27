@@ -10,7 +10,6 @@ import { tokenize } from "../shared/lexicon.js";
 import { CONTEXT_LIMITS } from "../shared/limits.js";
 import { atomicWrite, sha256 } from "../shared/util.js";
 import { SEARCH_INDEX_CACHE_DIRECTORY } from "../vault/layout.js";
-import { pruneCacheDirectory } from "../vault/cache.js";
 import { StudyStore } from "../vault/store.js";
 import { VerifiedSourceReader } from "../ingestion/source-reader.js";
 import {
@@ -83,15 +82,6 @@ const EMPTY_RETRIEVAL_DIAGNOSTICS: RetrievalDiagnostics = {
   indexedSourcesCurrent: 0,
   indexedChunksCurrent: 0,
 };
-
-/** How much of the index one repair pass reused, rebuilt, or discarded. */
-export interface SearchIndexRepairResult {
-  reused: number;
-  rebuilt: number;
-  staleEntriesRemoved: number;
-  indexedSources: number;
-  indexedChunks: number;
-}
 
 /**
  * Concept lookup and BM25 source search over checksum-verified evidence.
@@ -457,55 +447,6 @@ export class SearchService {
         this.retrievalDiagnostics.returnedChunks + update.returnedChunks,
       indexedSourcesCurrent: this.retrievalIndex.sourceCount(),
       indexedChunksCurrent: this.retrievalIndex.chunkCount(),
-    };
-  }
-
-  async repairSearchIndex(
-    sources: SourceRecord[],
-    mode: "incremental" | "full",
-    dryRun: boolean,
-  ): Promise<SearchIndexRepairResult> {
-    if (mode === "full") {
-      this.retrievalIndex.removeSourcesExcept(new Set());
-    } else {
-      this.retrievalIndex.removeSourcesExcept(
-        new Set(sources.map((source) => source.id)),
-      );
-    }
-
-    let reused = 0;
-    let rebuilt = 0;
-    for (const source of sources) {
-      if (mode === "incremental" && this.retrievalIndex.hasSource(source)) {
-        reused += 1;
-        continue;
-      }
-      if (mode === "incremental" && await this.restorePersistedSourceIndex(source)) {
-        reused += 1;
-        continue;
-      }
-      rebuilt += 1;
-      if (dryRun) continue;
-      const text = await this.reader.readSourceText(source);
-      this.retrievalIndex.upsertSource(source, text);
-      await this.persistSourceIndex(source);
-    }
-
-    const staleEntriesRemoved = await pruneCacheDirectory(
-      this.store,
-      SEARCH_INDEX_CACHE_DIRECTORY,
-      new Set(sources.map((source) => `${source.checksum}.json`)),
-      dryRun,
-    );
-
-    return {
-      reused,
-      rebuilt,
-      staleEntriesRemoved,
-      indexedSources: dryRun
-        ? reused
-        : this.retrievalIndex.sourceCount(),
-      indexedChunks: this.retrievalIndex.chunkCount(),
     };
   }
 }

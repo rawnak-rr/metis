@@ -11,7 +11,7 @@ import { MetisError } from "../shared/errors.js";
 export const WIKI_CITATION_PATTERN = /\[([A-Za-z0-9_-]+)#L(\d+)-L(\d+)\]/g;
 
 /** Lines one token may address, so a citation names a passage, not a document. */
-export const MAX_CITATION_LINES = 80;
+const MAX_CITATION_LINES = 80;
 
 export interface WikiCitation {
   token: string;

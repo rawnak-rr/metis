@@ -15,7 +15,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/src/cli/index.js",
-    "repair": "node dist/src/cli/index.js repair",
     "dev": "tsx src/cli/index.ts",
     "inspector": "npx @modelcontextprotocol/inspector tsx src/cli/index.ts",
     "test": "vitest run",

@@ -1,5 +1,5 @@
 import type { SearchChunk, SourceRecord } from "../contracts/types.js";
-import { isStopWord, stemSearch, tokenize, tokenizeRaw } from "../shared/lexicon.js";
+import { tokenize } from "../shared/lexicon.js";
 import { sha256, unique } from "../shared/util.js";
 
 /**
@@ -8,7 +8,7 @@ import { sha256, unique } from "../shared/util.js";
  * the parser, the chunker, or the tokenizer invalidates every stale index
  * automatically instead of silently reusing one.
  */
-export const SEARCH_INDEX_DERIVATION_VERSION = [
+const SEARCH_INDEX_DERIVATION_VERSION = [
   "text-parser-v2",
   "chunks-14-2-1400",
   "tokenizer-v2",

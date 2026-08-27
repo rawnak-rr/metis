@@ -1,4 +1,3 @@
-import type { SourceRecord } from "../contracts/types.js";
 import {
   parseSingleCitation,
   sliceCitedLines,

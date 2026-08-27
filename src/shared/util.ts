@@ -36,7 +36,7 @@ export function sanitizeFilename(value: string, fallback: string): string {
 
 const VAULT_ESCAPE_MESSAGE = "Resolved path is outside the configured study vault.";
 
-export function safePath(root: string, relativePath: string): string {
+function safePath(root: string, relativePath: string): string {
   if (path.isAbsolute(relativePath)) {
     throw new Error("Expected a path relative to the configured study vault.");
   }
