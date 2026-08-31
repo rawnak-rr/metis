@@ -1,6 +1,6 @@
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createKernel } from "../../src/kernel.js";
 import {
   fixture,
@@ -172,5 +172,96 @@ describe("search index and evidence selection", () => {
       6,
     );
     expect(packet.coverage).toBe("partial");
+  });
+  it("builds the concept index once per state revision", async () => {
+    const { store, metis } = await fixture();
+    const ingested = await metis.ingestion.ingest({
+      title: "Convexity Notes",
+      content: [
+        "A convex objective has a single global minimum.",
+        "Every local minimum of a convex objective is global.",
+      ].join("\n"),
+    });
+    await metis.wiki.upsertWikiPage({
+      title: "Convex Objective",
+      summary: "An objective whose local minima are all global.",
+      markdown: [
+        "# Convex Objective",
+        "",
+        `Local minima are global. [${ingested.source.id}#L1-L2]`,
+      ].join("\n"),
+      sourceIds: [ingested.source.id],
+      aliases: ["convexity"],
+      links: [],
+      tags: ["optimization"],
+    });
+
+    metis.search.resetRetrievalDiagnostics();
+    const first = await metis.search.lookupConcepts("convexity", 5);
+    expect(first[0]).toEqual(expect.objectContaining({
+      key: "convex-objective",
+      match: "alias",
+    }));
+    expect(metis.search.getRetrievalDiagnostics().conceptIndexBuilds).toBe(1);
+
+    const repeated = await metis.search.lookupConcepts("convexity", 5);
+    const session = await metis.search.openRetrieval();
+    expect(repeated).toEqual(first);
+    expect(session.lookupConcepts("convexity", 5)).toEqual(first);
+    expect(metis.search.getRetrievalDiagnostics().conceptIndexBuilds).toBe(1);
+
+    await metis.wiki.upsertWikiPage({
+      title: "Global Minimum",
+      summary: "The lowest value an objective attains anywhere.",
+      markdown: [
+        "# Global Minimum",
+        "",
+        `Every local minimum of a convex objective is global. [${ingested.source.id}#L1-L2]`,
+      ].join("\n"),
+      sourceIds: [ingested.source.id],
+      aliases: [],
+      links: ["convex-objective"],
+      tags: [],
+    });
+    const afterWrite = await metis.search.lookupConcepts("global minimum", 5);
+    expect(afterWrite[0]?.key).toBe("global-minimum");
+    expect(metis.search.getRetrievalDiagnostics().conceptIndexBuilds).toBe(2);
+    expect((await store.readState()).wikiPages).toHaveLength(2);
+  });
+  it("verifies each raw copy once per question, not once per search", async () => {
+    const { metis, grounding } = await fixture();
+    await metis.ingestion.ingest({
+      title: "Convex Optimization Lecture",
+      content: [
+        "A convex objective curves upward everywhere on its domain.",
+        "Every local minimum of a convex objective is also a global minimum.",
+        "That property is what makes convex problems tractable.",
+        "",
+        "Gradient descent steps against the objective gradient.",
+        "On a convex objective gradient descent converges to the global minimum.",
+        "The learning rate controls how far each descent step moves.",
+        "A learning rate that is too large makes gradient descent diverge.",
+      ].join("\n"),
+    });
+
+    const reads = vi.spyOn(metis.sources, "readSourceText");
+    try {
+      metis.search.resetRetrievalDiagnostics();
+      const packet = await grounding.prepareAnswer(
+        "What is a convex objective, and why does gradient descent converge on it?",
+        "sources_only",
+        3,
+      );
+      expect(packet.facets.length).toBeGreaterThan(1);
+      const diagnostics = metis.search.getRetrievalDiagnostics();
+      expect(diagnostics.searches).toBeGreaterThan(1);
+
+      const readSourceIds = reads.mock.calls.map(([source]) => source.id);
+      expect(readSourceIds.length).toBeGreaterThan(0);
+      expect(new Set(readSourceIds).size).toBe(readSourceIds.length);
+      expect(diagnostics.verifiedSources).toBe(readSourceIds.length);
+    } finally {
+      reads.mockRestore();
+    }
   });
 });

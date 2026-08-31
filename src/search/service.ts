@@ -16,6 +16,7 @@ import {
   buildConceptIndex,
   lookupConceptsIn,
   sourceIdsForConceptsIn,
+  type ConceptLookupIndex,
 } from "./concepts.js";
 import {
   IncrementalBm25Index,
@@ -53,6 +54,7 @@ export interface RetrievalDiagnostics {
   indexedTokenWork: number;
   verifiedSources: number;
   returnedChunks: number;
+  conceptIndexBuilds: number;
   indexedSourcesCurrent: number;
   indexedChunksCurrent: number;
 }
@@ -79,9 +81,37 @@ const EMPTY_RETRIEVAL_DIAGNOSTICS: RetrievalDiagnostics = {
   indexedTokenWork: 0,
   verifiedSources: 0,
   returnedChunks: 0,
+  conceptIndexBuilds: 0,
   indexedSourcesCurrent: 0,
   indexedChunksCurrent: 0,
 };
+
+/**
+ * Source text verified once for the life of one retrieval session.
+ *
+ * Every read re-hashes the raw copy before its text is trusted, and one
+ * question fans out into a search per facet and a second unscoped search
+ * whenever routing comes back thin. Verifying per search therefore re-reads
+ * and re-hashes the same file several times to answer one question. The scope
+ * keeps the guarantee at the boundary that matters, which is the answer: every
+ * source behind it is verified while it is being built, and read once.
+ */
+class VerifiedTextScope {
+  private readonly texts = new Map<string, Promise<string>>();
+  /** Raw copies actually read and hashed, for retrieval diagnostics. */
+  reads = 0;
+
+  constructor(private readonly reader: VerifiedSourceReader) {}
+
+  read(source: SourceRecord): Promise<string> {
+    const pending = this.texts.get(source.id);
+    if (pending) return pending;
+    this.reads += 1;
+    const text = this.reader.readSourceText(source);
+    this.texts.set(source.id, text);
+    return text;
+  }
+}
 
 /**
  * Concept lookup and BM25 source search over checksum-verified evidence.
@@ -94,6 +124,8 @@ const EMPTY_RETRIEVAL_DIAGNOSTICS: RetrievalDiagnostics = {
  */
 export class SearchService {
   private readonly retrievalIndex = new IncrementalBm25Index();
+  private conceptIndex: { revision: string; index: ConceptLookupIndex }
+    | undefined;
   private retrievalDiagnostics: RetrievalDiagnostics = {
     ...EMPTY_RETRIEVAL_DIAGNOSTICS,
   };
@@ -120,12 +152,13 @@ export class SearchService {
   }
 
   /**
-   * Opens concept lookup and source search over a single state snapshot and one
-   * concept index, so multi-facet retrieval does not reload the vault per facet.
+   * Opens concept lookup and source search over a single state snapshot, one
+   * concept index, and one verification scope, so multi-facet retrieval neither
+   * reloads the vault nor re-hashes a raw copy per facet.
    */
   async openRetrieval(): Promise<RetrievalSession> {
-    const state = await this.store.readState();
-    const index = buildConceptIndex(state);
+    const { state, index } = await this.openConceptIndex();
+    const verified = new VerifiedTextScope(this.reader);
     return {
       lookupConcepts: (query, limit = CONTEXT_LIMITS.conceptMatches) =>
         lookupConceptsIn(index, query, limit),
@@ -134,7 +167,7 @@ export class SearchService {
         query,
         limit = CONTEXT_LIMITS.sourceResultsDefault,
         options = {},
-      ) => this.searchSources(state, query, limit, options),
+      ) => this.searchSources(state, query, limit, options, verified),
     };
   }
 
@@ -142,8 +175,31 @@ export class SearchService {
     query: string,
     limit: number = CONTEXT_LIMITS.conceptMatches,
   ): Promise<ConceptCapsule[]> {
-    const index = buildConceptIndex(await this.store.readState());
+    const { index } = await this.openConceptIndex();
     return lookupConceptsIn(index, query, limit);
+  }
+
+  /**
+   * The concept index for the current state, built at most once per revision.
+   *
+   * The index is derived wholly from state, so an unchanged state file may
+   * reuse it. Callers only read the index and the capsules it hands out, and a
+   * capsule carries no reference a caller could write through, so one instance
+   * is safe to share across lookups and across retrieval sessions.
+   */
+  private async openConceptIndex(): Promise<{
+    state: StudyState;
+    index: ConceptLookupIndex;
+  }> {
+    const { state, revision } = await this.store.readStateSnapshot();
+    if (this.conceptIndex?.revision !== revision) {
+      this.conceptIndex = { revision, index: buildConceptIndex(state) };
+      this.retrievalDiagnostics = {
+        ...this.retrievalDiagnostics,
+        conceptIndexBuilds: this.retrievalDiagnostics.conceptIndexBuilds + 1,
+      };
+    }
+    return { state, index: this.conceptIndex.index };
   }
 
   async sourceIdsForConcepts(keys: string[]): Promise<Set<string>> {
@@ -155,7 +211,13 @@ export class SearchService {
     limit: number = CONTEXT_LIMITS.sourceResultsDefault,
     options: SourceSearchOptions = {},
   ): Promise<SearchChunk[]> {
-    return this.searchSources(await this.store.readState(), query, limit, options);
+    return this.searchSources(
+      await this.store.readState(),
+      query,
+      limit,
+      options,
+      new VerifiedTextScope(this.reader),
+    );
   }
 
   private async searchSources(
@@ -163,6 +225,7 @@ export class SearchService {
     query: string,
     limit: number,
     options: SourceSearchOptions,
+    verified: VerifiedTextScope,
   ): Promise<SearchChunk[]> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) throw new Error("Search query cannot be empty.");
@@ -178,6 +241,7 @@ export class SearchService {
       scopedSources,
       limit,
       options,
+      verified,
       sync,
       false,
     );
@@ -189,6 +253,7 @@ export class SearchService {
     scopedSources: SourceRecord[],
     limit: number,
     options: SourceSearchOptions,
+    verified: VerifiedTextScope,
     sync: SearchSyncDiagnostics,
     repaired: boolean,
   ): Promise<SearchChunk[]> {
@@ -252,19 +317,13 @@ export class SearchService {
     const sourcesById = new Map(
       scopedSources.map((source) => [source.id, source]),
     );
-    const verifiedTexts = new Map<string, string>();
-    const verifiedSources = new Set<string>();
+    const verifiedBefore = verified.reads;
     const hydrated: SearchChunk[] = [];
     const invalidCacheSources = new Set<string>();
     for (const candidate of selected) {
       const source = sourcesById.get(candidate.documentId);
       if (!source) continue;
-      let verifiedText = verifiedTexts.get(source.id);
-      if (verifiedText === undefined) {
-        verifiedText = await this.reader.readSourceText(source);
-        verifiedTexts.set(source.id, verifiedText);
-        verifiedSources.add(source.id);
-      }
+      const verifiedText = await verified.read(source);
       const text = rehydrateChunkText(
         verifiedText,
         candidate.lineStart,
@@ -300,8 +359,10 @@ export class SearchService {
       let repairedTokens = 0;
       for (const sourceId of invalidCacheSources) {
         const source = sourcesById.get(sourceId)!;
-        const verifiedText = verifiedTexts.get(sourceId)!;
-        const build = this.retrievalIndex.upsertSource(source, verifiedText);
+        const build = this.retrievalIndex.upsertSource(
+          source,
+          await verified.read(source),
+        );
         repairedChunks += build.chunks;
         repairedTokens += build.lexicalTokens;
         await this.persistSourceIndex(source).catch(() => undefined);
@@ -312,6 +373,7 @@ export class SearchService {
         scopedSources,
         limit,
         options,
+        verified,
         {
           ...sync,
           sourcesIndexed: sync.sourcesIndexed + invalidCacheSources.size,
@@ -329,7 +391,7 @@ export class SearchService {
       candidateChunksScored: indexed.diagnostics.candidateChunks,
       legacyEstimatedTokenVisits:
         indexed.diagnostics.legacyEstimatedTokenVisits,
-      verifiedSources: verifiedSources.size,
+      verifiedSources: verified.reads - verifiedBefore,
       returnedChunks: hydrated.length,
     });
     return hydrated;
@@ -445,6 +507,7 @@ export class SearchService {
         this.retrievalDiagnostics.verifiedSources + update.verifiedSources,
       returnedChunks:
         this.retrievalDiagnostics.returnedChunks + update.returnedChunks,
+      conceptIndexBuilds: this.retrievalDiagnostics.conceptIndexBuilds,
       indexedSourcesCurrent: this.retrievalIndex.sourceCount(),
       indexedChunksCurrent: this.retrievalIndex.chunkCount(),
     };

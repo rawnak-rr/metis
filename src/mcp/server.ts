@@ -381,12 +381,15 @@ function registerTools(
       const resolvedLimit = limit ?? (scope === "wiki"
         ? 1
         : CONTEXT_LIMITS.sourceResultsDefault);
+      // One session, so a scope of "all" reads the vault once instead of once
+      // per lookup.
+      const retrieval = await kernel.search.openRetrieval();
       const concepts = scope === "sources"
         ? []
-        : await kernel.search.lookupConcepts(query, resolvedLimit);
+        : retrieval.lookupConcepts(query, resolvedLimit);
       const hits = scope === "wiki"
         ? []
-        : await kernel.search.search(query, resolvedLimit);
+        : await retrieval.search(query, resolvedLimit);
       return jsonResult({
         ...(concepts.length > 0
           ? { concepts: concepts.map(compactConceptCapsule) }

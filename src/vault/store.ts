@@ -23,6 +23,7 @@ import {
   nowIso,
   safeExistingPath,
   safeWritePath,
+  sha256,
 } from "../shared/util.js";
 import {
   DERIVED_TEXT_CACHE_DIRECTORY,
@@ -46,6 +47,16 @@ const EMPTY_STATE: StudyState = {
   wikiPages: [],
   concepts: [],
 };
+
+/**
+ * A read of the state file paired with the hash of the bytes it was parsed
+ * from. Derived structures keyed on the revision rebuild when, and only when,
+ * the state they were derived from actually changed.
+ */
+export interface StudyStateSnapshot {
+  state: StudyState;
+  revision: string;
+}
 
 export interface ManagedMutationEffects {
   sourcePages?: Array<{ source: SourceRecord; preview: string }>;
@@ -165,6 +176,21 @@ export class StudyStore {
   async readState(): Promise<StudyState> {
     await this.initialize();
     return this.readStateFile();
+  }
+
+  /**
+   * Reads state and the revision of the bytes it came from.
+   *
+   * Hashing costs one pass over text this call already reads, so a caller that
+   * caches derived data pays it and `readState` does not.
+   */
+  async readStateSnapshot(): Promise<StudyStateSnapshot> {
+    await this.initialize();
+    const text = await readFile(this.statePath, "utf8");
+    return {
+      state: parseStudyState(JSON.parse(text) as unknown),
+      revision: sha256(text),
+    };
   }
 
   async mutate<T>(mutation: (state: StudyState) => T | Promise<T>): Promise<T> {
