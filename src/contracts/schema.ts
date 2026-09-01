@@ -22,6 +22,8 @@ const extractionMethodSchema = z.enum([
   "latex",
   "pdftotext",
   "vision",
+  /** A PDF with no text layer, transcribed page-by-page as images. */
+  "pdf-vision",
 ]);
 
 /** Image media types accepted by the Claude Messages API. */

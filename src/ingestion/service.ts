@@ -4,6 +4,7 @@ import type { SourceRecord } from "../contracts/types.js";
 import {
   SUPPORTED_SOURCE_EXTENSIONS,
   describeExtraction,
+  isDerivedTextIrreplaceable,
   isDerivedTextPersisted,
   sourceTypeFor,
   type SourceTypeDescriptor,
@@ -430,6 +431,12 @@ export class IngestService {
         );
       }
 
+      // Most methods are a pure function of the descriptor, but a PDF's
+      // extraction discovers at read time whether it has a text layer, so the
+      // method actually used (and its media type, when it fell back to
+      // per-page vision) can differ from the static descriptor for `.pdf`.
+      const extractionMethod = extracted.method ?? staged.descriptor.method;
+      const extractionMediaType = extracted.mediaType ?? staged.descriptor.mediaType;
       const source: SourceRecord = {
         id: sourceId,
         title,
@@ -439,19 +446,15 @@ export class IngestService {
         tags: unique(input.tags.map((tag) => tag.trim()).filter(Boolean)),
         ingestedAt: nowIso(),
         extraction: {
-          method: staged.descriptor.method,
-          ...(staged.descriptor.mediaType
-            ? { mediaType: staged.descriptor.mediaType }
-            : {}),
+          method: extractionMethod,
+          ...(extractionMediaType ? { mediaType: extractionMediaType } : {}),
           ...(extracted.model ? { model: extracted.model } : {}),
-          ...(isDerivedTextPersisted(staged.descriptor.method)
-            ? { extractedAt: nowIso() }
-            : {}),
+          ...(isDerivedTextPersisted(extractionMethod) ? { extractedAt: nowIso() } : {}),
         },
         ...(staged.originalPath ? { originalPath: staged.originalPath } : {}),
       };
       derivedTextWritten = await this.reader.persistDerivedText(source, extracted.text);
-      if (!derivedTextWritten && source.extraction.method === "vision") {
+      if (!derivedTextWritten && isDerivedTextIrreplaceable(source.extraction.method)) {
         // A transcript is the only record of an image's text, and re-running the
         // model would not reproduce it, so abandon rather than store evidence
         // whose line citations cannot be recovered.

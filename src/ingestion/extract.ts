@@ -1,7 +1,11 @@
 import { execFile } from "node:child_process";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import { MetisError } from "../shared/errors.js";
 import type { SourceTypeDescriptor } from "../contracts/source-types.js";
+import type { ExtractionMethod, ImageMediaType } from "../contracts/types.js";
 import { messageOf } from "../shared/util.js";
 import {
   MAX_VISION_IMAGE_BYTES,
@@ -13,12 +17,32 @@ const execFileAsync = promisify(execFile);
 /** Byte ceiling for text and PDF sources; images use MAX_VISION_IMAGE_BYTES. */
 const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
 
+/**
+ * Below this many non-whitespace characters, a PDF's text layer is treated as
+ * absent rather than sparse. A real page of prose clears this by two orders
+ * of magnitude; a slide deck exported to page images clears it by zero.
+ */
+const MIN_PDF_TEXT_LAYER_CHARACTERS = 20;
+
+/**
+ * Ceiling on pages transcribed by falling back to vision for one PDF. Each
+ * page is its own model call, so this bounds a single ingest's cost and
+ * latency rather than expressing a document-size policy.
+ */
+const MAX_PDF_VISION_PAGES = 150;
+
+/** A rate-limited or transiently failed page transcription is worth one retry. */
+const PDF_PAGE_TRANSCRIBE_ATTEMPTS = 2;
+const PDF_PAGE_RETRY_DELAY_MILLISECONDS = 1_500;
+
 export function maxBytesFor(descriptor: SourceTypeDescriptor): number {
   return descriptor.method === "vision" ? MAX_VISION_IMAGE_BYTES : MAX_SOURCE_BYTES;
 }
 
 export interface ExtractedText {
   text: string;
+  method?: ExtractionMethod;
+  mediaType?: ImageMediaType;
   model?: string;
 }
 
@@ -42,8 +66,16 @@ export async function extractSourceText(input: {
       return { text: extractMarkdownText(decodeUtf8(input.bytes, input.title)) };
     case "latex":
       return { text: extractLatexText(decodeUtf8(input.bytes, input.title)) };
+    // A source recorded as pdf-vision was itself discovered by this same
+    // branch on an earlier ingest; re-deriving it (e.g. after a cache miss)
+    // re-runs the identical text-layer check and reaches the same fallback.
     case "pdftotext":
-      return { text: normalizeText(await extractPdfText(input.absolutePath)) };
+    case "pdf-vision":
+      return extractPdfText({
+        absolutePath: input.absolutePath,
+        title: input.title,
+        transcriber: input.transcriber,
+      });
     case "vision": {
       const transcriber = input.transcriber;
       if (!transcriber) {
@@ -52,12 +84,12 @@ export async function extractSourceText(input: {
           "Image ingestion is disabled for this Metis instance because no vision transcriber is configured.",
         );
       }
-      const transcript = await transcriber.transcribe({
+      const transcribed = await transcriber.transcribe({
         bytes: input.bytes,
         mediaType: input.descriptor.mediaType ?? "image/png",
         title: input.title,
       });
-      return { text: normalizeText(transcript), model: transcriber.model };
+      return { text: normalizeText(transcribed.text), model: transcribed.model };
     }
   }
 }
@@ -201,7 +233,61 @@ function cleanLatexInline(value: string): string {
     .replace(/[ \t]{2,}/g, " ");
 }
 
-async function extractPdfText(absolutePath: string): Promise<string> {
+/**
+ * Extract a PDF's text layer, falling back to page-by-page vision
+ * transcription when Poppler finds pages but no citable text on them — the
+ * shape of a slide deck exported straight to page images. Either path yields
+ * one derived text for the whole file, so a citation still addresses one
+ * stable line range regardless of which method produced it.
+ */
+async function extractPdfText(input: {
+  absolutePath: string;
+  title: string;
+  transcriber?: VisionTranscriber;
+}): Promise<ExtractedText> {
+  const layered = normalizeText(await runPdfToText(input.absolutePath));
+  if (countNonWhitespace(layered) >= MIN_PDF_TEXT_LAYER_CHARACTERS) {
+    return { text: layered, method: "pdftotext" };
+  }
+  if (!input.transcriber) {
+    throw new MetisError(
+      "EXTRACT_VISION_UNAVAILABLE",
+      `'${input.title}' has no extractable text layer, so its pages need vision transcription, but no transcriber is configured for this Metis instance.`,
+    );
+  }
+  const pages = await renderPdfPages(input.absolutePath, input.title);
+  if (pages.length > MAX_PDF_VISION_PAGES) {
+    throw new MetisError(
+      "EXTRACT_PDF_TOO_MANY_PAGES",
+      `'${input.title}' has ${pages.length} image-only pages, above the `
+        + `${MAX_PDF_VISION_PAGES}-page limit for automatic transcription. `
+        + "Split it and ingest the parts separately.",
+    );
+  }
+  const transcripts: string[] = [];
+  // Recorded provenance is the model that transcribed the first page; a
+  // sampling-backed transcriber could in principle vary per call, but every
+  // page still carries its own resolved model in the derived text if that
+  // ever needs auditing.
+  let model: string | undefined;
+  for (const page of pages) {
+    const transcribed = await transcribePdfPageWithRetry(input.transcriber, {
+      bytes: page.bytes,
+      mediaType: "image/png",
+      title: `${input.title} (page ${page.number} of ${pages.length})`,
+    });
+    model ??= transcribed.model;
+    transcripts.push(`[page ${page.number}]\n${transcribed.text.trim()}`);
+  }
+  return {
+    text: normalizeText(transcripts.join("\n\n")),
+    method: "pdf-vision",
+    mediaType: "image/png",
+    ...(model ? { model } : {}),
+  };
+}
+
+async function runPdfToText(absolutePath: string): Promise<string> {
   try {
     const { stdout } = await execFileAsync(
       "pdftotext",
@@ -220,10 +306,77 @@ async function extractPdfText(absolutePath: string): Promise<string> {
     }
     throw new MetisError(
       "EXTRACT_PDF_FAILED",
-      "Could not extract text from this PDF. It may be encrypted, damaged, or image-only; export the pages as images to transcribe them instead.",
+      "Could not extract text from this PDF. It may be encrypted or damaged.",
       { detail: messageOf(error), cause: error },
     );
   }
+}
+
+function countNonWhitespace(text: string): number {
+  return text.replace(/\s+/g, "").length;
+}
+
+/** One page rendered to a standalone PNG, in page order. */
+async function renderPdfPages(
+  absolutePath: string,
+  title: string,
+): Promise<Array<{ number: number; bytes: Buffer }>> {
+  const workingDirectory = await mkdtemp(path.join(os.tmpdir(), "metis-pdf-"));
+  try {
+    try {
+      await execFileAsync(
+        "pdftoppm",
+        ["-png", absolutePath, path.join(workingDirectory, "page")],
+        { maxBuffer: 64 * 1024 * 1024 },
+      );
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (code === "ENOENT") {
+        throw new MetisError(
+          "EXTRACT_PDF_RENDER_TOOL_MISSING",
+          "Transcribing an image-only PDF needs Poppler's `pdftoppm` on PATH. Install Poppler and retry.",
+          { detail: messageOf(error), cause: error },
+        );
+      }
+      throw new MetisError(
+        "EXTRACT_PDF_RENDER_FAILED",
+        `Could not render the pages of '${title}' to images.`,
+        { detail: messageOf(error), cause: error },
+      );
+    }
+    const rendered = (await readdir(workingDirectory))
+      .map((name) => {
+        const match = /-(\d+)\.png$/.exec(name);
+        return match ? { name, number: Number(match[1]) } : undefined;
+      })
+      .filter((entry): entry is { name: string; number: number } => entry !== undefined)
+      .sort((first, second) => first.number - second.number);
+    return await Promise.all(rendered.map(async (entry) => ({
+      number: entry.number,
+      bytes: await readFile(path.join(workingDirectory, entry.name)),
+    })));
+  } finally {
+    await rm(workingDirectory, { recursive: true, force: true });
+  }
+}
+
+async function transcribePdfPageWithRetry(
+  transcriber: VisionTranscriber,
+  input: { bytes: Buffer; mediaType: ImageMediaType; title: string },
+): Promise<{ text: string; model: string }> {
+  for (let attempt = 1; attempt <= PDF_PAGE_TRANSCRIBE_ATTEMPTS; attempt += 1) {
+    try {
+      return await transcriber.transcribe(input);
+    } catch (error) {
+      const canRetry = attempt < PDF_PAGE_TRANSCRIBE_ATTEMPTS
+        && error instanceof MetisError && error.retryable;
+      if (!canRetry) throw error;
+      await new Promise((resolve) => {
+        setTimeout(resolve, PDF_PAGE_RETRY_DELAY_MILLISECONDS * attempt);
+      });
+    }
+  }
+  throw new MetisError("EXTRACT_VISION_FAILED", `Transcription of '${input.title}' failed.`);
 }
 
 function hasUtf8Bom(bytes: Buffer): boolean {

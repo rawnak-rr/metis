@@ -12,7 +12,7 @@ import type { WikiLintResult } from "../synthesis/wiki.js";
 import { GroundingService } from "../grounding/service.js";
 import { PacketStore } from "../grounding/packets.js";
 import { GROUNDING_POLICY } from "../grounding/policy.js";
-import { samplingEntailmentJudge } from "./sampling.js";
+import { samplingEntailmentJudge, samplingVisionTranscriber } from "./sampling.js";
 import { groundingModeSchema, type GroundingMode } from "../contracts/schema.js";
 import { StudyStore } from "../vault/store.js";
 import type { VisionTranscriber } from "../ingestion/vision.js";
@@ -34,12 +34,6 @@ export async function createStudyServer(
 ): Promise<StudyServer> {
   const store = new StudyStore(root);
   await store.initialize();
-  const kernel = createKernel(store, options.vision);
-  const grounding = new GroundingService(
-    store,
-    kernel.search,
-    new PacketStore(store),
-  );
   const server = new McpServer({
     name: "metis",
     version: METIS_VERSION,
@@ -57,11 +51,23 @@ export async function createStudyServer(
       "Facet statuses are conservative lexical routing signals, not entailment: answer supported facets, qualify partially_supported ones, leave unsupported ones unfilled under the mode, and explicitly compare conflicting or possible_numeric_conflict evidence.",
       "An excerpt marked lexicalSupport 'related', or listed in a facet's borderlineCitations, is in the packet on retrieval relevance alone because the lexical check could not confirm it; read it and judge it yourself instead of relying on the facet status.",
       "A facet carrying statusMethod 'entailment' was judged by sampling this client's model rather than by token coverage, so its citations name the passages that actually answered it.",
+      "Ingesting an image, or a PDF page with no text layer, may prompt this client via sampling to transcribe it; approve that when it names a source you just asked to ingest.",
     ].join(" "),
   });
 
-  // Sampling depends on the client that connects, so the judge resolves the
-  // capability per call rather than at construction.
+  // Sampling depends on the client that connects, so both resolve the
+  // capability per call rather than at construction. `options.vision` is only
+  // a fallback for a client that never advertises sampling; the default
+  // ingestion path needs no Anthropic credentials of Metis's own.
+  const vision = samplingVisionTranscriber(() => server.server, {
+    fallback: options.vision,
+  });
+  const kernel = createKernel(store, vision);
+  const grounding = new GroundingService(
+    store,
+    kernel.search,
+    new PacketStore(store),
+  );
   grounding.useEntailmentJudge(samplingEntailmentJudge(() => server.server));
 
   registerResources(server, store, kernel);
@@ -263,7 +269,7 @@ function registerTools(
   server.registerTool(
     "ingest_source",
     {
-      description: `Store text, or a vault-relative file, as immutable searchable evidence. Supported file types: ${SUPPORTED_SOURCE_EXTENSIONS.join(", ")}. PDFs are extracted with pdftotext, images are transcribed with a cheap Claude vision model, Markdown keeps its body while frontmatter is dropped, and LaTeX is reduced to prose with original line numbers preserved. A failure returns a stable 'error.code' to branch on.`,
+      description: `Store text, or a vault-relative file, as immutable searchable evidence. Supported file types: ${SUPPORTED_SOURCE_EXTENSIONS.join(", ")}. PDFs are extracted with pdftotext; an image, or a PDF page with no text layer, is transcribed by asking the connected client to run its own vision-capable model over it. Markdown keeps its body while frontmatter is dropped, and LaTeX is reduced to prose with original line numbers preserved. A failure returns a stable 'error.code' to branch on.`,
       inputSchema: {
         title: z.string().min(1).max(200),
         content: z.string().optional().describe("Direct source text; mutually exclusive with sourcePath"),

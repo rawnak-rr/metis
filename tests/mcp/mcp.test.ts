@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -208,6 +208,87 @@ describe("MCP surface", () => {
         citations: [`[${answerId}#L1-L1]`],
         borderlineCitations: [`[${decoyId}#L1-L1]`],
       })]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("transcribes an image by asking a sampling-capable client to run its own model", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "metis-mcp-vision-sampling-"));
+    roots.push(root);
+    const { server } = await createStudyServer(root);
+    const client = new Client(
+      { name: "vision-sampling-client", version: "1.0.0" },
+      { capabilities: { sampling: {} } },
+    );
+    let imageRequests = 0;
+    // Stand in for the client's own (cheapest) vision-capable model: confirm
+    // an image block actually arrived, then answer with a fixed transcript.
+    client.setRequestHandler(CreateMessageRequestSchema, async (request) => {
+      imageRequests += 1;
+      const blocks = request.params.messages
+        .flatMap((message) => Array.isArray(message.content) ? message.content : [message.content]);
+      expect(blocks.some((block) => block.type === "image")).toBe(true);
+      return {
+        model: "client-cheapest-vision-model",
+        role: "assistant" as const,
+        content: { type: "text" as const, text: "Figure: a single red pixel." },
+      };
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    try {
+      await writeFile(path.join(root, "slide.png"), Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AABAAB/wD8HwGiAAAAAElFTkSuQmCC",
+        "base64",
+      ));
+      const result = toolObject(await client.callTool({
+        name: "ingest_source",
+        arguments: { title: "Slide", sourcePath: "slide.png" },
+      })) as { source: { kind: string; extraction: { method: string; model: string } } };
+
+      expect(imageRequests).toBe(1);
+      expect(result.source.kind).toBe("image");
+      expect(result.source.extraction).toEqual(expect.objectContaining({
+        method: "vision",
+        model: "client-cheapest-vision-model",
+      }));
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("reports a coded failure for an image when no client offers sampling and no fallback is configured", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "metis-mcp-vision-none-"));
+    roots.push(root);
+    const { server } = await createStudyServer(root);
+    const client = new Client({ name: "no-sampling-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    try {
+      await writeFile(path.join(root, "slide.png"), Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AABAAB/wD8HwGiAAAAAElFTkSuQmCC",
+        "base64",
+      ));
+      const failure = await client.callTool({
+        name: "ingest_source",
+        arguments: { title: "Slide", sourcePath: "slide.png" },
+      });
+      expect(failure.isError).toBe(true);
+      const payload = JSON.parse(
+        (failure.content as Array<{ text: string }>)[0]!.text,
+      ) as { error: { code: string } };
+      expect(payload.error.code).toBe("EXTRACT_VISION_UNAVAILABLE");
     } finally {
       await client.close();
       await server.close();

@@ -24,8 +24,8 @@ Metis deliberately does one thing: ingest material, index it, route to the right
 ## Requirements
 
 - Node.js 20 or newer
-- `pdftotext` from Poppler for PDF ingestion
-- `@anthropic-ai/sdk` and Claude API credentials for image ingestion (optional; only images need them)
+- `pdftotext` and `pdftoppm` from Poppler for PDF ingestion
+- An MCP client that supports sampling, so it can transcribe images and image-only PDF pages with its own model. `@anthropic-ai/sdk` and Claude API credentials are only needed as a fallback for a client that never advertises sampling.
 
 On macOS with Homebrew:
 
@@ -95,12 +95,12 @@ For strict closed-book behavior, choose `sources_only`. The normal `sources_firs
 | `.txt`, `.text` | `text` | Verbatim |
 | `.csv`, `.tsv`, `.json`, `.yaml`, `.yml` | `data` | Verbatim |
 | `.tex` | `latex` | Comments, preamble, environment markers, and bookkeeping macros blanked; sectioning commands become Markdown headings |
-| `.pdf` | `pdf` | Poppler `pdftotext -layout` |
-| `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` | `image` | Transcribed by a Claude vision model |
+| `.pdf` | `pdf` | Poppler `pdftotext -layout`; page-by-page vision transcription if the PDF has no text layer |
+| `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` | `image` | Transcribed by the connected client's own model |
 
 Text extraction never changes a line's number, so a citation such as `[src_ab12#L8-L14]` addresses the same lines in the extracted text and in the raw file you can open in Obsidian.
 
-Non-PDF images are transcribed with `claude-haiku-4-5`, the cheapest Claude model with vision, because transcription is high volume and needs no reasoning. Set `METIS_VISION_MODEL` to use a stronger reader. Credentials are resolved by the Anthropic SDK (`ANTHROPIC_API_KEY`, or an `ant auth login` profile). Because a transcript cannot be re-derived byte-for-byte, it is persisted under `.metis/cache/text-v1/` and reused for every later read and duplicate ingestion, so an image is never transcribed twice, and its line citations stay stable. PDF text is cached the same way. Every source record carries its extraction method, media type, and transcribing model, and the generated provenance page shows them, so model-transcribed evidence is never mistaken for verbatim text.
+An image, or a PDF page with no text layer (a slide deck exported straight to page images, most commonly), is transcribed by asking the connected MCP client to run its own vision-capable model over it through sampling — Metis holds no model or API key of its own for this by default, and the client picks whichever model it wants (typically its cheapest one, since transcription is high volume and needs no reasoning). A client that never advertises sampling falls back to a configured `VisionTranscriber` if one was set up (`AnthropicVisionTranscriber` by default for a standalone/embedded kernel, honoring `METIS_VISION_MODEL` and Anthropic credentials resolved via `ANTHROPIC_API_KEY` or an `ant auth login` profile); with neither sampling nor a fallback, image extraction fails with `EXTRACT_VISION_UNAVAILABLE`. A PDF that falls back to vision is capped at 150 pages per ingest (`EXTRACT_PDF_TOO_MANY_PAGES` above that) and needs `pdftoppm` on `PATH` to render its pages. Because a transcript cannot be re-derived byte-for-byte, it is persisted under `.metis/cache/text-v1/` and reused for every later read and duplicate ingestion, so nothing is transcribed twice and its line citations stay stable. PDF text extracted with `pdftotext` is cached the same way. Every source record carries its extraction method (`pdftotext`, `pdf-vision`, or `vision`), media type, and transcribing model, and the generated provenance page shows them, so model-transcribed evidence is never mistaken for verbatim text.
 
 Text sources must be valid UTF-8; a byte-order mark is accepted and stripped. Text and PDF sources are capped at 32 MiB, images at 5 MiB.
 
@@ -119,11 +119,14 @@ A failed ingestion returns a stable `error.code` plus `error.retryable`, so call
 | `EXTRACT_NOT_UTF8` | Bytes are binary or another encoding |
 | `EXTRACT_EMPTY_TEXT` | Extraction produced no citable text |
 | `EXTRACT_PDF_TOOL_MISSING` | `pdftotext` is not on `PATH` |
-| `EXTRACT_PDF_FAILED` | PDF is encrypted, damaged, or image-only |
-| `EXTRACT_VISION_UNAVAILABLE` | Optional `@anthropic-ai/sdk` is not installed |
-| `EXTRACT_VISION_NOT_CONFIGURED` | Claude credentials are missing or rejected |
+| `EXTRACT_PDF_FAILED` | PDF is encrypted or damaged |
+| `EXTRACT_PDF_RENDER_TOOL_MISSING` | `pdftoppm` is not on `PATH`, needed to render an image-only PDF's pages |
+| `EXTRACT_PDF_RENDER_FAILED` | Rendering an image-only PDF's pages failed |
+| `EXTRACT_PDF_TOO_MANY_PAGES` | An image-only PDF has more than 150 pages; split it |
+| `EXTRACT_VISION_UNAVAILABLE` | No connected client advertises sampling, and no fallback transcriber is configured |
+| `EXTRACT_VISION_NOT_CONFIGURED` | The fallback's Claude credentials are missing or rejected |
 | `EXTRACT_VISION_RATE_LIMITED` | Retryable; the model is rate limited |
-| `EXTRACT_VISION_REFUSED` | The model declined to transcribe the image |
+| `EXTRACT_VISION_REFUSED` | The model declined to transcribe the image, or returned no transcript |
 | `EXTRACT_VISION_TRUNCATED` | Transcript hit the output limit; split the image |
 | `EXTRACT_VISION_FAILED` | Retryable; the transcription request failed |
 | `INGEST_COPY_VERIFICATION_FAILED` | Stored copy did not match the input checksum |
@@ -188,8 +191,8 @@ The test suite covers the immutable source and wiki flow, grounded retrieval, ci
 ## Current boundaries
 
 - Retrieval is local BM25-style lexical search behind a direct keyed concept map and checksum-keyed incremental inverted index. Lexical matching is the kernel's weakest layer and the current focus of work. Derived per-source indexes are disposable and carry a derivation fingerprint, so a changed parser, chunker, or tokenizer rebuilds them automatically; selected line spans are rehydrated only after the raw source checksum is verified. An optional embedding or hybrid reranker can be added without changing the vault format.
-- PDF ingestion extracts embedded text with `pdftotext`; a scanned, image-only PDF fails with `EXTRACT_PDF_FAILED` rather than being transcribed, so export its pages as images to read them.
-- Image transcription is a model output, not a verbatim reading. It is labelled as such on every source record and provenance page, but a transcript can still misread handwriting or dense notation. Its cache entry under `.metis/cache/text-v1/` is the only copy, so back that directory up yourself; if it is lost, reads fail with `DERIVED_TEXT_UNRECOVERABLE` rather than re-transcribing, because a second transcript would move every line citation into that source.
+- PDF ingestion extracts embedded text with `pdftotext`; a PDF whose pages carry no text layer falls back to rendering each page and transcribing it, capped at 150 pages per ingest.
+- Image and image-only-PDF transcription is a model output, not a verbatim reading, and by default it is the connected client's own model rather than one Metis holds credentials for. It is labelled as such on every source record and provenance page, but a transcript can still misread handwriting or dense notation. Its cache entry under `.metis/cache/text-v1/` is the only copy, so back that directory up yourself; if it is lost, reads fail with `DERIVED_TEXT_UNRECOVERABLE` rather than re-transcribing, because a second transcript would move every line citation into that source.
 - Ingestion is structure-blind: `.csv`, `.json`, and `.yaml` sources are chunked as prose, and a LaTeX `verbatim` environment has its `%` characters treated as comments.
 - The connected LLM performs explanation and wiki synthesis. Metis provides compact evidence packets, persistent state, and one-time server policy rather than embedding a specific model vendor.
 - Local state/log writes are serialized and cross-process locked; ingestion and wiki compilation also roll back generated files when their managed transaction fails. A future shared HTTP deployment still needs transactional multi-user storage and authentication.

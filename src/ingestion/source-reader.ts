@@ -3,6 +3,7 @@ import path from "node:path";
 import type { SourceRecord } from "../contracts/types.js";
 import {
   descriptorForSource,
+  isDerivedTextIrreplaceable,
   isDerivedTextPersisted,
 } from "../contracts/source-types.js";
 import { MetisError } from "../shared/errors.js";
@@ -83,13 +84,13 @@ export class VerifiedSourceReader {
         });
         return stored;
       }
-      if (descriptor.method === "vision") {
+      if (isDerivedTextIrreplaceable(descriptor.method)) {
         // Re-running the model would produce a different transcript, so every
         // line citation into this source would silently address different text.
         // Failing loudly keeps a dead citation distinguishable from a moved one.
         throw new MetisError(
           "DERIVED_TEXT_UNRECOVERABLE",
-          `The stored transcript for '${source.id}' is missing or failed its integrity check, and an image transcript cannot be reproduced. Restore ${DERIVED_TEXT_CACHE_DIRECTORY} from your own backup; re-transcribing would move every line citation into this source.`,
+          `The stored transcript for '${source.id}' is missing or failed its integrity check, and a model transcript cannot be reproduced byte-identically. Restore ${DERIVED_TEXT_CACHE_DIRECTORY} from your own backup; re-transcribing would move every line citation into this source.`,
         );
       }
     }

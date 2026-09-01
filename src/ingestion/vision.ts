@@ -15,7 +15,7 @@ export const CHEAPEST_VISION_MODEL = "claude-haiku-4-5";
 /** Per-image ceiling; the Messages API rejects larger base64 image blocks. */
 export const MAX_VISION_IMAGE_BYTES = 5 * 1024 * 1024;
 
-const TRANSCRIPTION_SYSTEM_PROMPT = [
+export const TRANSCRIPTION_SYSTEM_PROMPT = [
   "You transcribe images into plain text that will be stored as immutable, citable evidence.",
   "Transcribe every legible character exactly as written, in reading order, preserving line breaks, list markers, and table rows.",
   "Preserve mathematics as written; use LaTeX only where the image itself uses mathematical notation.",
@@ -26,13 +26,18 @@ const TRANSCRIPTION_SYSTEM_PROMPT = [
   "Return only the transcription.",
 ].join(" ");
 
+/**
+ * The model is reported per call, not fixed at construction: a transcriber
+ * backed by MCP sampling only learns which model actually ran once the
+ * client's response comes back, so provenance has to be dynamic for both
+ * implementations to satisfy the same contract.
+ */
 export interface VisionTranscriber {
-  readonly model: string;
   transcribe(input: {
     bytes: Buffer;
     mediaType: ImageMediaType;
     title: string;
-  }): Promise<string>;
+  }): Promise<{ text: string; model: string }>;
 }
 
 /**
@@ -53,7 +58,7 @@ export class AnthropicVisionTranscriber implements VisionTranscriber {
     bytes: Buffer;
     mediaType: ImageMediaType;
     title: string;
-  }): Promise<string> {
+  }): Promise<{ text: string; model: string }> {
     if (input.bytes.byteLength > MAX_VISION_IMAGE_BYTES) {
       throw new MetisError(
         "INGEST_SOURCE_TOO_LARGE",
@@ -85,7 +90,7 @@ export class AnthropicVisionTranscriber implements VisionTranscriber {
     } catch (error) {
       throw visionRequestError(error, this.model);
     }
-    return readTranscript(response, this.model);
+    return { text: readTranscript(response, this.model), model: this.model };
   }
 
   private async resolveClient(): Promise<Anthropic> {

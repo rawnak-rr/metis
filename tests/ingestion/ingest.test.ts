@@ -10,6 +10,7 @@ import { MetisError, type MetisErrorCode } from "../../src/shared/errors.js";
 import {
   extractLatexText,
   extractMarkdownText,
+  extractSourceText,
   normalizeText,
 } from "../../src/ingestion/extract.js";
 import { createKernel } from "../../src/kernel.js";
@@ -35,14 +36,14 @@ class StubTranscriber implements VisionTranscriber {
     bytes: Buffer;
     mediaType: string;
     title: string;
-  }): Promise<string> {
+  }): Promise<{ text: string; model: string }> {
     this.calls.push({
       mediaType: input.mediaType,
       title: input.title,
       bytes: input.bytes.byteLength,
     });
     if (this.behaviour instanceof MetisError) throw this.behaviour;
-    return this.behaviour;
+    return { text: this.behaviour, model: this.model };
   }
 }
 
@@ -89,6 +90,61 @@ function pdfBytes(line: string): Buffer {
   document += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`
     + `startxref\n${xrefAt}\n%%EOF\n`;
   return Buffer.from(document, "latin1");
+}
+
+/** A multi-page PDF; a blank content stream leaves each page with no text layer. */
+function multiPagePdfBytes(pageContents: string[]): Buffer {
+  const fontId = 3 + pageContents.length * 2;
+  const objects: string[] = [];
+  const kids = pageContents.map((_, index) => `${3 + index * 2} 0 R`).join(" ");
+  objects.push(`1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`);
+  objects.push(
+    `2 0 obj\n<< /Type /Pages /Kids [${kids}] /Count ${pageContents.length} >>\nendobj\n`,
+  );
+  pageContents.forEach((stream, index) => {
+    const pageId = 3 + index * 2;
+    const contentsId = pageId + 1;
+    objects.push(
+      `${pageId} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 150]`
+        + ` /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentsId} 0 R >>\nendobj\n`,
+    );
+    objects.push(`${contentsId} 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`);
+  });
+  objects.push(`${fontId} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n`);
+
+  let document = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (const object of objects) {
+    offsets.push(document.length);
+    document += object;
+  }
+  const xrefAt = document.length;
+  document += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) {
+    document += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  }
+  document += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`
+    + `startxref\n${xrefAt}\n%%EOF\n`;
+  return Buffer.from(document, "latin1");
+}
+
+/** Replays fixed behaviours across successive calls, for retry/fallback tests. */
+class SequencedTranscriber implements VisionTranscriber {
+  readonly model = CHEAPEST_VISION_MODEL;
+  readonly calls: Array<{ title: string }> = [];
+  private index = 0;
+
+  constructor(private readonly behaviours: Array<string | MetisError>) {}
+
+  async transcribe(
+    input: { bytes: Buffer; mediaType: string; title: string },
+  ): Promise<{ text: string; model: string }> {
+    this.calls.push({ title: input.title });
+    const behaviour = this.behaviours[Math.min(this.index, this.behaviours.length - 1)]!;
+    this.index += 1;
+    if (behaviour instanceof MetisError) throw behaviour;
+    return { text: behaviour, model: this.model };
+  }
 }
 
 async function ingestCode(operation: () => Promise<unknown>): Promise<MetisErrorCode> {
@@ -405,6 +461,91 @@ describe("image ingestion", () => {
       sourcePath: "huge.png",
     }))).toBe("INGEST_SOURCE_TOO_LARGE");
     expect(transcriber.calls).toEqual([]);
+    expect(await readdir(path.join(root, "raw"))).toEqual([]);
+  });
+});
+
+describe("image-only PDF ingestion", () => {
+  it("falls back to page-by-page vision transcription when a PDF has no text layer", async () => {
+    const transcriber = new StubTranscriber("Handwritten derivation of the Black-Scholes PDE.");
+    const { root, metis } = await fixture(transcriber);
+    await writeFile(path.join(root, "slides.pdf"), multiPagePdfBytes(["", "", ""]));
+
+    const ingested = await metis.ingestion.ingest({
+      title: "Black-Scholes Slides",
+      sourcePath: "slides.pdf",
+    });
+
+    expect(ingested.source.kind).toBe("pdf");
+    expect(ingested.source.extraction).toEqual(expect.objectContaining({
+      method: "pdf-vision",
+      mediaType: "image/png",
+      model: CHEAPEST_VISION_MODEL,
+    }));
+    expect(transcriber.calls).toHaveLength(3);
+    expect(transcriber.calls.map((call) => call.title)).toEqual([
+      "Black-Scholes Slides (page 1 of 3)",
+      "Black-Scholes Slides (page 2 of 3)",
+      "Black-Scholes Slides (page 3 of 3)",
+    ]);
+    const text = await metis.sources.readSourceText(ingested.source);
+    expect(text).toContain("[page 1]");
+    expect(text).toContain("[page 2]");
+    expect(text).toContain("[page 3]");
+    expect(text).toContain("Black-Scholes PDE");
+  });
+
+  it("reports a coded failure for an image-only PDF with no vision transcriber configured", async () => {
+    // A real ingest always resolves a transcriber (falling back to
+    // AnthropicVisionTranscriber, which would attempt a live API call in a
+    // test), so this exercises extraction directly with no transcriber at all
+    // — the state a Metis instance is in when vision support is disabled.
+    const root = await mkdtemp(path.join(os.tmpdir(), "metis-ingest-"));
+    temporaryDirectories.push(root);
+    const absolutePath = path.join(root, "slides.pdf");
+    await writeFile(absolutePath, multiPagePdfBytes(["", ""]));
+    const bytes = await readFile(absolutePath);
+
+    expect(await ingestCode(() => extractSourceText({
+      descriptor: { kind: "pdf", method: "pdftotext" },
+      bytes,
+      absolutePath,
+      title: "Untranscribable Slides",
+    }))).toBe("EXTRACT_VISION_UNAVAILABLE");
+  });
+
+  it("retries a rate-limited page transcription once before giving up on the source", async () => {
+    const rateLimited = new MetisError("EXTRACT_VISION_RATE_LIMITED", "rate limited");
+    const transcriber = new SequencedTranscriber([
+      "First slide, in view.",
+      rateLimited,
+      "Second slide, after one retry.",
+    ]);
+    const { root, metis } = await fixture(transcriber);
+    await writeFile(path.join(root, "slides.pdf"), multiPagePdfBytes(["", ""]));
+
+    const ingested = await metis.ingestion.ingest({
+      title: "Flaky Slides",
+      sourcePath: "slides.pdf",
+    });
+
+    expect(transcriber.calls).toHaveLength(3);
+    const text = await metis.sources.readSourceText(ingested.source);
+    expect(text).toContain("First slide, in view.");
+    expect(text).toContain("Second slide, after one retry.");
+  }, 10_000);
+
+  it("does not retry a non-retryable page failure, and commits nothing", async () => {
+    const refused = new MetisError("EXTRACT_VISION_REFUSED", "declined to transcribe");
+    const transcriber = new SequencedTranscriber(["First slide.", refused]);
+    const { root, metis } = await fixture(transcriber);
+    await writeFile(path.join(root, "slides.pdf"), multiPagePdfBytes(["", ""]));
+
+    expect(await ingestCode(() => metis.ingestion.ingest({
+      title: "Refused Slides",
+      sourcePath: "slides.pdf",
+    }))).toBe("EXTRACT_VISION_REFUSED");
+    expect(transcriber.calls).toHaveLength(2);
     expect(await readdir(path.join(root, "raw"))).toEqual([]);
   });
 });
@@ -1039,6 +1180,30 @@ describe("derived text integrity", () => {
     expect(await ingestCode(() => reopened.sources.readSourceText(ingested.source)))
       .toBe("DERIVED_TEXT_UNRECOVERABLE");
     expect(transcriber.calls).toHaveLength(1);
+  });
+
+  it("refuses to re-transcribe an image-only PDF whose stored derivation is gone", async () => {
+    const transcriber = new StubTranscriber("Handwritten derivation of the Black-Scholes PDE.");
+    const { root, store, metis } = await fixture(transcriber);
+    await writeFile(path.join(root, "slides.pdf"), multiPagePdfBytes(["", ""]));
+    const ingested = await metis.ingestion.ingest({
+      title: "Black-Scholes Slides",
+      sourcePath: "slides.pdf",
+    });
+    expect(transcriber.calls).toHaveLength(2);
+
+    await rm(path.join(
+      root,
+      ".metis",
+      "cache",
+      "text-v1",
+      `${ingested.source.checksum}.json`,
+    ));
+
+    const reopened = createKernel(store, transcriber);
+    expect(await ingestCode(() => reopened.sources.readSourceText(ingested.source)))
+      .toBe("DERIVED_TEXT_UNRECOVERABLE");
+    expect(transcriber.calls).toHaveLength(2);
   });
 
   it("recovers a PDF derivation from the raw bytes and re-persists it", async () => {
