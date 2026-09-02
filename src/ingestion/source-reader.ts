@@ -18,6 +18,9 @@ function derivedTextRelativePath(checksum: string): string {
   return path.posix.join(DERIVED_TEXT_CACHE_DIRECTORY, `${checksum}.json`);
 }
 
+/** Bumped whenever the derived-text format changes, so a stale cache entry re-derives. */
+const DERIVATION_VERSION = 2;
+
 /**
  * The single way anything in Metis reads a stored source.
  *
@@ -32,6 +35,7 @@ export class VerifiedSourceReader {
   private readonly sourceTextCache = new Map<string, {
     checksum: string;
     text: string;
+    lineToPage?: number[];
   }>();
 
   readonly transcriber: VisionTranscriber;
@@ -44,10 +48,11 @@ export class VerifiedSourceReader {
   }
 
   /** Remember text a caller already derived, so the next read is free. */
-  cacheText(source: SourceRecord, text: string): void {
+  cacheText(source: SourceRecord, text: string, lineToPage?: number[]): void {
     this.sourceTextCache.set(source.id, {
       checksum: source.checksum,
       text,
+      lineToPage,
     });
   }
 
@@ -68,20 +73,26 @@ export class VerifiedSourceReader {
   }
 
   async readSourceText(source: SourceRecord): Promise<string> {
+    return (await this.readSourceTextWithPages(source)).text;
+  }
+
+  /** Like `readSourceText`, but also returns the per-line PDF page map, when one exists. */
+  async readSourceTextWithPages(
+    source: SourceRecord,
+  ): Promise<{ text: string; lineToPage?: number[] }> {
     // Integrity is verified before any cached text is trusted, so tampering with
     // a raw copy can never be masked by an earlier read.
     const { absolute, bytes } = await this.readVerifiedBytes(source);
     const cached = this.sourceTextCache.get(source.id);
-    if (cached?.checksum === source.checksum) return cached.text;
+    if (cached?.checksum === source.checksum) {
+      return { text: cached.text, lineToPage: cached.lineToPage };
+    }
     const descriptor = descriptorForSource(source);
     const persistent = isDerivedTextPersisted(descriptor.method);
     if (persistent) {
       const stored = await this.readDerivedText(source);
       if (stored !== undefined) {
-        this.sourceTextCache.set(source.id, {
-          checksum: source.checksum,
-          text: stored,
-        });
+        this.sourceTextCache.set(source.id, { checksum: source.checksum, ...stored });
         return stored;
       }
       if (isDerivedTextIrreplaceable(descriptor.method)) {
@@ -101,12 +112,13 @@ export class VerifiedSourceReader {
       title: source.title,
       transcriber: this.transcriber,
     });
-    if (persistent) await this.persistDerivedText(source, extracted.text);
+    if (persistent) await this.persistDerivedText(source, extracted.text, extracted.lineToPage);
     this.sourceTextCache.set(source.id, {
       checksum: source.checksum,
       text: extracted.text,
+      lineToPage: extracted.lineToPage,
     });
-    return extracted.text;
+    return { text: extracted.text, lineToPage: extracted.lineToPage };
   }
 
   /**
@@ -117,6 +129,7 @@ export class VerifiedSourceReader {
   async persistDerivedText(
     source: SourceRecord,
     text: string,
+    lineToPage?: number[],
   ): Promise<boolean> {
     if (!isDerivedTextPersisted(source.extraction.method)) return false;
     try {
@@ -125,8 +138,10 @@ export class VerifiedSourceReader {
         `${JSON.stringify({
           sourceChecksum: source.checksum,
           textChecksum: sha256(text),
+          derivationVersion: DERIVATION_VERSION,
           method: source.extraction.method,
           ...(source.extraction.model ? { model: source.extraction.model } : {}),
+          ...(lineToPage ? { lineToPage } : {}),
           extractedAt: source.extraction.extractedAt ?? nowIso(),
           text,
         })}\n`,
@@ -138,28 +153,37 @@ export class VerifiedSourceReader {
   }
 
   /**
-   * Read stored derived text. An entry is only returned when the text matches
-   * its own recorded checksum, so a truncated or edited cache file is
-   * indistinguishable from an absent one.
+   * Read stored derived text. An entry is only returned when it matches its
+   * own recorded checksum and the current derivation format, so a truncated,
+   * edited, or format-stale cache file is indistinguishable from an absent one.
    */
-  private async readDerivedText(source: SourceRecord): Promise<string | undefined> {
+  private async readDerivedText(
+    source: SourceRecord,
+  ): Promise<{ text: string; lineToPage?: number[] } | undefined> {
     try {
       const raw = await this.store.readText(derivedTextRelativePath(source.checksum));
       const value = JSON.parse(raw) as {
         sourceChecksum?: unknown;
         textChecksum?: unknown;
+        derivationVersion?: unknown;
         method?: unknown;
+        lineToPage?: unknown;
         text?: unknown;
       };
       if (
         value.sourceChecksum !== source.checksum
         || value.method !== source.extraction.method
+        || value.derivationVersion !== DERIVATION_VERSION
         || typeof value.text !== "string"
         || value.textChecksum !== sha256(value.text)
       ) {
         return undefined;
       }
-      return value.text;
+      const lineToPage = Array.isArray(value.lineToPage)
+        && value.lineToPage.every((entry) => typeof entry === "number")
+        ? value.lineToPage as number[]
+        : undefined;
+      return { text: value.text, lineToPage };
     } catch {
       return undefined;
     }

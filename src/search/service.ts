@@ -405,8 +405,9 @@ export class SearchService {
   async indexIngestedSource(
     source: SourceRecord,
     extractedText: string,
+    lineToPage?: number[],
   ): Promise<void> {
-    this.reader.cacheText(source, extractedText);
+    this.reader.cacheText(source, extractedText, lineToPage);
     this.retrievalIndex.upsertSource(source, extractedText);
     await this.persistSourceIndex(source).catch(() => undefined);
   }

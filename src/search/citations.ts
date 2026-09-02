@@ -1,4 +1,5 @@
 import {
+  pageForLine,
   parseSingleCitation,
   sliceCitedLines,
   sourceTextLines,
@@ -13,7 +14,7 @@ import { messageOf, unique } from "../shared/util.js";
 import { StudyStore } from "../vault/store.js";
 import { VerifiedSourceReader } from "../ingestion/source-reader.js";
 
-/** Citation tokens resolvable in one `resolve` call. */
+// to ensure citations are small
 const MAX_RESOLVED_CITATIONS = 24;
 
 export interface ResolvedCitation {
@@ -27,6 +28,9 @@ export interface ResolvedCitation {
   sourceChecksum: string;
   /** How the cited text was derived, so a transcript stays distinguishable. */
   extraction: string;
+  /** PDF page range this citation falls in, when the source is a PDF. */
+  pdfPageStart?: number;
+  pdfPageEnd?: number;
 }
 
 export interface UnresolvedCitation {
@@ -65,7 +69,9 @@ export class CitationResolver {
    * because a caller rehydrating a page wants the excerpts it can still get.
    */
   async resolveCitations(tokens: string[]): Promise<CitationResolution> {
-    const requested = unique(tokens.map((token) => token.trim()).filter(Boolean));
+    const requested = unique(
+      tokens.map((token) => token.trim()).filter(Boolean),
+    );
     if (requested.length > MAX_RESOLVED_CITATIONS) {
       throw new MetisError(
         "CITATION_BATCH_TOO_LARGE",
@@ -73,8 +79,10 @@ export class CitationResolver {
       );
     }
     const state = await this.store.readState();
-    const sourcesById = new Map(state.sources.map((source) => [source.id, source]));
-    const linesBySourceId = new Map<string, string[]>();
+    const sourcesById = new Map(
+      state.sources.map((source) => [source.id, source]),
+    );
+    const linesBySourceId = new Map<string, { lines: string[]; lineToPage?: number[] }>();
     const resolved: ResolvedCitation[] = [];
     const unresolved: UnresolvedCitation[] = [];
 
@@ -88,27 +96,33 @@ export class CitationResolver {
             `Citation ${token} references source '${citation.sourceId}', which is not in this vault.`,
           );
         }
-        let lines = linesBySourceId.get(source.id);
-        if (!lines) {
-          lines = sourceTextLines(await this.reader.readSourceText(source));
-          linesBySourceId.set(source.id, lines);
+        let entry = linesBySourceId.get(source.id);
+        if (!entry) {
+          const derived = await this.reader.readSourceTextWithPages(source);
+          entry = { lines: sourceTextLines(derived.text), lineToPage: derived.lineToPage };
+          linesBySourceId.set(source.id, entry);
         }
+        const pdfPageStart = pageForLine(entry.lineToPage, citation.lineStart);
+        const pdfPageEnd = pageForLine(entry.lineToPage, citation.lineEnd);
         resolved.push({
           token: citation.token,
           sourceId: source.id,
           title: source.title,
           lineStart: citation.lineStart,
           lineEnd: citation.lineEnd,
-          text: sliceCitedLines(lines, citation),
+          text: sliceCitedLines(entry.lines, citation),
           sourceChecksum: source.checksum,
           extraction: describeExtraction(source),
+          ...(pdfPageStart !== undefined ? { pdfPageStart, pdfPageEnd } : {}),
         });
       } catch (error) {
         unresolved.push({
           token,
-          error: errorPayload(error instanceof MetisError
-            ? error
-            : new MetisError("CITATION_MALFORMED", messageOf(error))),
+          error: errorPayload(
+            error instanceof MetisError
+              ? error
+              : new MetisError("CITATION_MALFORMED", messageOf(error)),
+          ),
         });
       }
     }

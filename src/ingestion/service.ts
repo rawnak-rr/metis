@@ -51,7 +51,11 @@ const MANAGED_VAULT_DIRECTORIES = new Set(["raw", "wiki", ".metis"]);
  */
 export interface SourceIndexWriter {
   hasSource(source: Pick<SourceRecord, "id" | "checksum">): boolean;
-  indexIngestedSource(source: SourceRecord, extractedText: string): Promise<void>;
+  indexIngestedSource(
+    source: SourceRecord,
+    extractedText: string,
+    lineToPage?: number[],
+  ): Promise<void>;
 }
 
 export interface IngestInput {
@@ -106,6 +110,7 @@ export interface IngestManyResult {
 interface PreparedSource {
   source: SourceRecord;
   text: string;
+  lineToPage?: number[];
   preview: string;
   rawCopyAbsolute: string;
   derivedTextWritten: boolean;
@@ -148,8 +153,8 @@ export class IngestService {
     if (existing) {
       // Identical bytes already carry verified text; never pay for extraction,
       // and never re-transcribe an image, to answer a duplicate ingestion.
-      const text = await this.reader.readSourceText(existing);
-      await this.index.indexIngestedSource(existing, text);
+      const { text, lineToPage } = await this.reader.readSourceTextWithPages(existing);
+      await this.index.indexIngestedSource(existing, text, lineToPage);
       return {
         source: existing,
         duplicate: true,
@@ -190,7 +195,7 @@ export class IngestService {
       await this.discardPrepared([prepared]);
       throw ingestionFailure(error);
     }
-    await this.index.indexIngestedSource(prepared.source, prepared.text);
+    await this.index.indexIngestedSource(prepared.source, prepared.text, prepared.lineToPage);
     return {
       source: prepared.source,
       duplicate: false,
@@ -353,14 +358,14 @@ export class IngestService {
     // so a failure is recorded on its item and the result still stands. A
     // duplicate is indexed too, exactly as a single duplicate ingestion is.
     const preparedText = new Map(
-      prepared.map((entry) => [entry.source.id, entry.text]),
+      prepared.map((entry) => [entry.source.id, { text: entry.text, lineToPage: entry.lineToPage }]),
     );
     for (const item of items) {
       if (!item.source || this.index.hasSource(item.source)) continue;
       try {
-        const text = preparedText.get(item.source.id)
-          ?? await this.reader.readSourceText(item.source);
-        await this.index.indexIngestedSource(item.source, text);
+        const { text, lineToPage } = preparedText.get(item.source.id)
+          ?? await this.reader.readSourceTextWithPages(item.source);
+        await this.index.indexIngestedSource(item.source, text, lineToPage);
       } catch (error) {
         item.error = errorPayload(error);
       }
@@ -453,7 +458,11 @@ export class IngestService {
         },
         ...(staged.originalPath ? { originalPath: staged.originalPath } : {}),
       };
-      derivedTextWritten = await this.reader.persistDerivedText(source, extracted.text);
+      derivedTextWritten = await this.reader.persistDerivedText(
+        source,
+        extracted.text,
+        extracted.lineToPage,
+      );
       if (!derivedTextWritten && isDerivedTextIrreplaceable(source.extraction.method)) {
         // A transcript is the only record of an image's text, and re-running the
         // model would not reproduce it, so abandon rather than store evidence
@@ -467,6 +476,7 @@ export class IngestService {
       return {
         source,
         text: extracted.text,
+        lineToPage: extracted.lineToPage,
         preview: preview(extracted.text),
         rawCopyAbsolute,
         derivedTextWritten,

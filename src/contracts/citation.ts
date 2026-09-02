@@ -44,6 +44,11 @@ export function sourceTextLines(text: string): string[] {
   return text.replace(/\r\n/g, "\n").split("\n");
 }
 
+/** 1-based PDF page containing `line`, given a per-line page map. */
+export function pageForLine(lineToPage: number[] | undefined, line: number): number | undefined {
+  return lineToPage?.[line - 1];
+}
+
 /**
  * Bounds and precision rules for a citation, shared by wiki validation and
  * citation resolution so a token that a page may carry is exactly a token that

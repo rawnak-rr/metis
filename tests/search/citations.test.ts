@@ -1,8 +1,11 @@
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   fixture,
   useTemporaryVaults,
 } from "../support/vault.js";
+import { multiPagePdfBytes } from "../support/pdf.js";
 
 useTemporaryVaults();
 
@@ -71,6 +74,39 @@ describe("citation resolution", () => {
       "CITATION_SOURCE_UNKNOWN",
       "CITATION_OUT_OF_BOUNDS",
     ]);
+  });
+
+  it("reports the PDF page a citation falls on", async () => {
+    const { root, metis } = await fixture();
+    const streamFor = (text: string) => `BT /F1 12 Tf 20 100 Td (${text}) Tj ET`;
+    await writeFile(
+      path.join(root, "pages.pdf"),
+      multiPagePdfBytes([
+        streamFor("Alpha content"),
+        streamFor("Beta content"),
+        streamFor("Gamma content"),
+      ]),
+    );
+    const ingested = await metis.ingestion.ingest({
+      title: "Pages",
+      sourcePath: "pages.pdf",
+    });
+
+    const lines = ingested.preview.split("\n");
+    const lineOf = (needle: string) => lines.findIndex((line) => line.includes(needle)) + 1;
+    const alphaLine = lineOf("Alpha content");
+    const gammaLine = lineOf("Gamma content");
+
+    const alphaToken = `[${ingested.source.id}#L${alphaLine}-L${alphaLine}]`;
+    const gammaToken = `[${ingested.source.id}#L${gammaLine}-L${gammaLine}]`;
+    const resolution = await metis.citations.resolveCitations([alphaToken, gammaToken]);
+
+    expect(resolution.unresolved).toEqual([]);
+    const [alpha, gamma] = resolution.resolved;
+    expect(alpha!.pdfPageStart).toBe(1);
+    expect(alpha!.pdfPageEnd).toBe(1);
+    expect(gamma!.pdfPageStart).toBe(3);
+    expect(gamma!.pdfPageEnd).toBe(3);
   });
 
   it("refuses a batch larger than the per-call ceiling", async () => {

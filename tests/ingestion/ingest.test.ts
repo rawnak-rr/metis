@@ -22,6 +22,7 @@ import {
   CHEAPEST_VISION_MODEL,
   type VisionTranscriber,
 } from "../../src/ingestion/vision.js";
+import { multiPagePdfBytes, pdfBytes } from "../support/pdf.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -63,69 +64,6 @@ function pngBytes(padding = 0): Buffer {
     "base64",
   );
   return padding > 0 ? Buffer.concat([image, Buffer.alloc(padding)]) : image;
-}
-
-/** Minimal single-page PDF with one text line, readable by pdftotext. */
-function pdfBytes(line: string): Buffer {
-  const stream = `BT /F1 12 Tf 72 720 Td (${line}) Tj ET`;
-  const objects = [
-    "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
-      + " /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
-    "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
-    `5 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`,
-  ];
-  let document = "%PDF-1.4\n";
-  const offsets: number[] = [];
-  for (const object of objects) {
-    offsets.push(document.length);
-    document += object;
-  }
-  const xrefAt = document.length;
-  document += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  for (const offset of offsets) {
-    document += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  }
-  document += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`
-    + `startxref\n${xrefAt}\n%%EOF\n`;
-  return Buffer.from(document, "latin1");
-}
-
-/** A multi-page PDF; a blank content stream leaves each page with no text layer. */
-function multiPagePdfBytes(pageContents: string[]): Buffer {
-  const fontId = 3 + pageContents.length * 2;
-  const objects: string[] = [];
-  const kids = pageContents.map((_, index) => `${3 + index * 2} 0 R`).join(" ");
-  objects.push(`1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`);
-  objects.push(
-    `2 0 obj\n<< /Type /Pages /Kids [${kids}] /Count ${pageContents.length} >>\nendobj\n`,
-  );
-  pageContents.forEach((stream, index) => {
-    const pageId = 3 + index * 2;
-    const contentsId = pageId + 1;
-    objects.push(
-      `${pageId} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 150]`
-        + ` /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentsId} 0 R >>\nendobj\n`,
-    );
-    objects.push(`${contentsId} 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`);
-  });
-  objects.push(`${fontId} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n`);
-
-  let document = "%PDF-1.4\n";
-  const offsets: number[] = [];
-  for (const object of objects) {
-    offsets.push(document.length);
-    document += object;
-  }
-  const xrefAt = document.length;
-  document += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  for (const offset of offsets) {
-    document += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  }
-  document += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`
-    + `startxref\n${xrefAt}\n%%EOF\n`;
-  return Buffer.from(document, "latin1");
 }
 
 /** Replays fixed behaviours across successive calls, for retry/fallback tests. */
@@ -344,6 +282,34 @@ describe("ingestion", () => {
     }))).toBe("EXTRACT_PDF_FAILED");
     expect(await readdir(path.join(root, "raw"))).toEqual([]);
   });
+
+  it("maps each line of a multi-page PDF's text layer back to its page", async () => {
+    const { root } = await fixture();
+    const streamFor = (text: string) => `BT /F1 12 Tf 20 100 Td (${text}) Tj ET`;
+    const bytes = multiPagePdfBytes([
+      streamFor("Alpha content"),
+      streamFor("Beta content"),
+      streamFor("Gamma content"),
+    ]);
+    const absolutePath = path.join(root, "pages.pdf");
+    await writeFile(absolutePath, bytes);
+
+    const extracted = await extractSourceText({
+      descriptor: { kind: "pdf", method: "pdftotext" },
+      bytes,
+      absolutePath,
+      title: "Pages",
+    });
+
+    expect(extracted.method).toBe("pdftotext");
+    const lines = extracted.text.split("\n");
+    expect(extracted.lineToPage).toHaveLength(lines.length);
+    const pageOf = (needle: string) =>
+      extracted.lineToPage?.[lines.findIndex((line) => line.includes(needle))];
+    expect(pageOf("Alpha content")).toBe(1);
+    expect(pageOf("Beta content")).toBe(2);
+    expect(pageOf("Gamma content")).toBe(3);
+  });
 });
 
 describe("image ingestion", () => {
@@ -488,11 +454,9 @@ describe("image-only PDF ingestion", () => {
       "Black-Scholes Slides (page 2 of 3)",
       "Black-Scholes Slides (page 3 of 3)",
     ]);
-    const text = await metis.sources.readSourceText(ingested.source);
-    expect(text).toContain("[page 1]");
-    expect(text).toContain("[page 2]");
-    expect(text).toContain("[page 3]");
+    const { text, lineToPage } = await metis.sources.readSourceTextWithPages(ingested.source);
     expect(text).toContain("Black-Scholes PDE");
+    expect(new Set(lineToPage)).toEqual(new Set([1, 2, 3]));
   });
 
   it("reports a coded failure for an image-only PDF with no vision transcriber configured", async () => {

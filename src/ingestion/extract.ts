@@ -7,10 +7,7 @@ import { MetisError } from "../shared/errors.js";
 import type { SourceTypeDescriptor } from "../contracts/source-types.js";
 import type { ExtractionMethod, ImageMediaType } from "../contracts/types.js";
 import { messageOf } from "../shared/util.js";
-import {
-  MAX_VISION_IMAGE_BYTES,
-  type VisionTranscriber,
-} from "./vision.js";
+import { MAX_VISION_IMAGE_BYTES, type VisionTranscriber } from "./vision.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,7 +33,9 @@ const PDF_PAGE_TRANSCRIBE_ATTEMPTS = 2;
 const PDF_PAGE_RETRY_DELAY_MILLISECONDS = 1_500;
 
 export function maxBytesFor(descriptor: SourceTypeDescriptor): number {
-  return descriptor.method === "vision" ? MAX_VISION_IMAGE_BYTES : MAX_SOURCE_BYTES;
+  return descriptor.method === "vision"
+    ? MAX_VISION_IMAGE_BYTES
+    : MAX_SOURCE_BYTES;
 }
 
 export interface ExtractedText {
@@ -44,6 +43,8 @@ export interface ExtractedText {
   method?: ExtractionMethod;
   mediaType?: ImageMediaType;
   model?: string;
+  /** PDF page number for each line of `text`, 1-based. Absent for non-PDF sources. */
+  lineToPage?: number[];
 }
 
 /**
@@ -63,12 +64,11 @@ export async function extractSourceText(input: {
     case "verbatim":
       return { text: normalizeText(decodeUtf8(input.bytes, input.title)) };
     case "markdown":
-      return { text: extractMarkdownText(decodeUtf8(input.bytes, input.title)) };
+      return {
+        text: extractMarkdownText(decodeUtf8(input.bytes, input.title)),
+      };
     case "latex":
       return { text: extractLatexText(decodeUtf8(input.bytes, input.title)) };
-    // A source recorded as pdf-vision was itself discovered by this same
-    // branch on an earlier ingest; re-deriving it (e.g. after a cache miss)
-    // re-runs the identical text-layer check and reaches the same fallback.
     case "pdftotext":
     case "pdf-vision":
       return extractPdfText({
@@ -89,7 +89,10 @@ export async function extractSourceText(input: {
         mediaType: input.descriptor.mediaType ?? "image/png",
         title: input.title,
       });
-      return { text: normalizeText(transcribed.text), model: transcribed.model };
+      return {
+        text: normalizeText(transcribed.text),
+        model: transcribed.model,
+      };
     }
   }
 }
@@ -135,8 +138,10 @@ export function normalizeText(text: string): string {
 export function extractMarkdownText(raw: string): string {
   const lines = normalizeText(raw).split("\n");
   if (lines[0]?.trim() !== "---") return lines.join("\n");
-  const closing = lines.findIndex((line, index) =>
-    index > 0 && (line.trim() === "---" || line.trim() === "..."));
+  const closing = lines.findIndex(
+    (line, index) =>
+      index > 0 && (line.trim() === "---" || line.trim() === "..."),
+  );
   if (closing === -1) return lines.join("\n");
   for (let index = 0; index <= closing; index += 1) lines[index] = "";
   return lines.join("\n");
@@ -169,30 +174,37 @@ const LATEX_DROPPED_MACRO_PATTERN =
 export function extractLatexText(raw: string): string {
   const lines = normalizeText(raw).split("\n").map(stripLatexComment);
 
-  const documentStart = lines.findIndex((line) => line.includes("\\begin{document}"));
+  const documentStart = lines.findIndex((line) =>
+    line.includes("\\begin{document}"),
+  );
   if (documentStart !== -1) {
     for (let index = 0; index <= documentStart; index += 1) lines[index] = "";
-    const documentEnd = lines.findIndex((line, index) =>
-      index > documentStart && line.includes("\\end{document}"));
+    const documentEnd = lines.findIndex(
+      (line, index) =>
+        index > documentStart && line.includes("\\end{document}"),
+    );
     if (documentEnd !== -1) {
-      for (let index = documentEnd; index < lines.length; index += 1) lines[index] = "";
+      for (let index = documentEnd; index < lines.length; index += 1)
+        lines[index] = "";
     }
   }
 
-  return lines.map((raw) => {
-    if (!raw.trim()) return "";
-    // Bookkeeping macros are removed first so a trailing \\label does not end up
-    // inside the captured section title.
-    const line = stripLatexMacros(raw);
-    const section = LATEX_SECTION_PATTERN.exec(line);
-    if (section) {
-      const level = LATEX_SECTIONS[section[1]!] ?? 3;
-      const heading = cleanLatexInline(section[2] ?? "").trim();
-      return heading ? `${"#".repeat(level)} ${heading}` : "";
-    }
-    if (LATEX_ENVIRONMENT_PATTERN.test(line)) return "";
-    return cleanLatexInline(line).trimEnd();
-  }).join("\n");
+  return lines
+    .map((raw) => {
+      if (!raw.trim()) return "";
+      // Bookkeeping macros are removed first so a trailing \\label does not end up
+      // inside the captured section title.
+      const line = stripLatexMacros(raw);
+      const section = LATEX_SECTION_PATTERN.exec(line);
+      if (section) {
+        const level = LATEX_SECTIONS[section[1]!] ?? 3;
+        const heading = cleanLatexInline(section[2] ?? "").trim();
+        return heading ? `${"#".repeat(level)} ${heading}` : "";
+      }
+      if (LATEX_ENVIRONMENT_PATTERN.test(line)) return "";
+      return cleanLatexInline(line).trimEnd();
+    })
+    .join("\n");
 }
 
 /** Remove a trailing `%` comment, honouring escaped percent signs. */
@@ -227,7 +239,10 @@ function cleanLatexInline(value: string): string {
   return result
     .replace(/^\s*\\item\b\s*(?:\[[^\]]*\])?/, "- ")
     .replace(/\\\\\s*(?:\[[^\]]*\])?$/, "")
-    .replace(/\\(?:par|noindent|centering|maketitle|tableofcontents|newpage|clearpage|linebreak|bigskip|medskip|smallskip)\b/g, "")
+    .replace(
+      /\\(?:par|noindent|centering|maketitle|tableofcontents|newpage|clearpage|linebreak|bigskip|medskip|smallskip)\b/g,
+      "",
+    )
     .replace(/\\([%&_#${}])/g, "$1")
     .replace(/~/g, " ")
     .replace(/[ \t]{2,}/g, " ");
@@ -245,9 +260,12 @@ async function extractPdfText(input: {
   title: string;
   transcriber?: VisionTranscriber;
 }): Promise<ExtractedText> {
-  const layered = normalizeText(await runPdfToText(input.absolutePath));
+  const rawPages = splitPdfPages(await runPdfToText(input.absolutePath)).map(
+    normalizeText,
+  );
+  const { text: layered, lineToPage } = flattenPdfPages(rawPages);
   if (countNonWhitespace(layered) >= MIN_PDF_TEXT_LAYER_CHARACTERS) {
-    return { text: layered, method: "pdftotext" };
+    return { text: layered, method: "pdftotext", lineToPage };
   }
   if (!input.transcriber) {
     throw new MetisError(
@@ -255,34 +273,32 @@ async function extractPdfText(input: {
       `'${input.title}' has no extractable text layer, so its pages need vision transcription, but no transcriber is configured for this Metis instance.`,
     );
   }
-  const pages = await renderPdfPages(input.absolutePath, input.title);
-  if (pages.length > MAX_PDF_VISION_PAGES) {
+  const renderedPages = await renderPdfPages(input.absolutePath, input.title);
+  if (renderedPages.length > MAX_PDF_VISION_PAGES) {
     throw new MetisError(
       "EXTRACT_PDF_TOO_MANY_PAGES",
-      `'${input.title}' has ${pages.length} image-only pages, above the `
-        + `${MAX_PDF_VISION_PAGES}-page limit for automatic transcription. `
-        + "Split it and ingest the parts separately.",
+      `'${input.title}' has ${renderedPages.length} image-only pages, above the ` +
+        `${MAX_PDF_VISION_PAGES}-page limit for automatic transcription. ` +
+        "Split it and ingest the parts separately.",
     );
   }
   const transcripts: string[] = [];
-  // Recorded provenance is the model that transcribed the first page; a
-  // sampling-backed transcriber could in principle vary per call, but every
-  // page still carries its own resolved model in the derived text if that
-  // ever needs auditing.
   let model: string | undefined;
-  for (const page of pages) {
+  for (const page of renderedPages) {
     const transcribed = await transcribePdfPageWithRetry(input.transcriber, {
       bytes: page.bytes,
       mediaType: "image/png",
-      title: `${input.title} (page ${page.number} of ${pages.length})`,
+      title: `${input.title} (page ${page.number} of ${renderedPages.length})`,
     });
     model ??= transcribed.model;
-    transcripts.push(`[page ${page.number}]\n${transcribed.text.trim()}`);
+    transcripts.push(normalizeText(transcribed.text.trim()));
   }
+  const transcribed = flattenPdfPages(transcripts);
   return {
-    text: normalizeText(transcripts.join("\n\n")),
+    text: transcribed.text,
     method: "pdf-vision",
     mediaType: "image/png",
+    lineToPage: transcribed.lineToPage,
     ...(model ? { model } : {}),
   };
 }
@@ -291,7 +307,7 @@ async function runPdfToText(absolutePath: string): Promise<string> {
   try {
     const { stdout } = await execFileAsync(
       "pdftotext",
-      ["-layout", "-nopgbrk", absolutePath, "-"],
+      ["-layout", absolutePath, "-"],
       { maxBuffer: 64 * 1024 * 1024 },
     );
     return stdout;
@@ -310,6 +326,27 @@ async function runPdfToText(absolutePath: string): Promise<string> {
       { detail: messageOf(error), cause: error },
     );
   }
+}
+
+function splitPdfPages(raw: string): string[] {
+  const pages = raw.split("\f");
+  if (pages.length > 1 && pages[pages.length - 1]!.trim() === "") {
+    pages.pop();
+  }
+  return pages;
+}
+
+/** Join per-page text into one string, tagging each resulting line with its page. */
+function flattenPdfPages(pages: string[]): { text: string; lineToPage: number[] } {
+  const lines: string[] = [];
+  const lineToPage: number[] = [];
+  pages.forEach((page, index) => {
+    for (const line of page.split("\n")) {
+      lines.push(line);
+      lineToPage.push(index + 1);
+    }
+  });
+  return { text: lines.join("\n"), lineToPage };
 }
 
 function countNonWhitespace(text: string): number {
@@ -349,12 +386,17 @@ async function renderPdfPages(
         const match = /-(\d+)\.png$/.exec(name);
         return match ? { name, number: Number(match[1]) } : undefined;
       })
-      .filter((entry): entry is { name: string; number: number } => entry !== undefined)
+      .filter(
+        (entry): entry is { name: string; number: number } =>
+          entry !== undefined,
+      )
       .sort((first, second) => first.number - second.number);
-    return await Promise.all(rendered.map(async (entry) => ({
-      number: entry.number,
-      bytes: await readFile(path.join(workingDirectory, entry.name)),
-    })));
+    return await Promise.all(
+      rendered.map(async (entry) => ({
+        number: entry.number,
+        bytes: await readFile(path.join(workingDirectory, entry.name)),
+      })),
+    );
   } finally {
     await rm(workingDirectory, { recursive: true, force: true });
   }
@@ -368,18 +410,27 @@ async function transcribePdfPageWithRetry(
     try {
       return await transcriber.transcribe(input);
     } catch (error) {
-      const canRetry = attempt < PDF_PAGE_TRANSCRIBE_ATTEMPTS
-        && error instanceof MetisError && error.retryable;
+      const canRetry =
+        attempt < PDF_PAGE_TRANSCRIBE_ATTEMPTS &&
+        error instanceof MetisError &&
+        error.retryable;
       if (!canRetry) throw error;
       await new Promise((resolve) => {
         setTimeout(resolve, PDF_PAGE_RETRY_DELAY_MILLISECONDS * attempt);
       });
     }
   }
-  throw new MetisError("EXTRACT_VISION_FAILED", `Transcription of '${input.title}' failed.`);
+  throw new MetisError(
+    "EXTRACT_VISION_FAILED",
+    `Transcription of '${input.title}' failed.`,
+  );
 }
 
 function hasUtf8Bom(bytes: Buffer): boolean {
-  return bytes.byteLength >= 3
-    && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  return (
+    bytes.byteLength >= 3 &&
+    bytes[0] === 0xef &&
+    bytes[1] === 0xbb &&
+    bytes[2] === 0xbf
+  );
 }
